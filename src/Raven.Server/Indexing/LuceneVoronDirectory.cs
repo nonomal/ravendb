@@ -39,7 +39,7 @@ namespace Raven.Server.Indexing
             tx.CreateTree(_name);
 
             _indexOutputFilesSummary = new IndexOutputFilesSummary();
-            TempFileCache = new TempFileCache(environment.Options);        }
+        }
 
         public override bool FileExists(string name, IState s)
         {
@@ -219,7 +219,6 @@ namespace Raven.Server.Indexing
 
         protected override void Dispose(bool disposing)
         {
-            TempFileCache.Dispose();
         }
     }
 }
