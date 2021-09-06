@@ -9,8 +9,11 @@ using Raven.Client.Documents.Operations.ConnectionStrings;
 using Raven.Client.Documents.Operations.ETL;
 using Raven.Client.Documents.Operations.OngoingTasks;
 using Raven.Client.Util;
+using Raven.Server.Config;
+using Raven.Server.Config.Categories;
 using Raven.Server.Documents.ETL;
 using Raven.Server.NotificationCenter;
+using Raven.Server.ServerWide;
 using Sparrow.Json;
 using Tests.Infrastructure.Utils;
 using Xunit;
@@ -22,7 +25,17 @@ namespace SlowTests.Server.Documents.ETL
     public abstract class EtlTestBase : RavenTestBase
     {
         private DocumentStore _src;
-        
+
+        protected static readonly BackupConfiguration DefaultBackupConfiguration;
+
+        static EtlTestBase()
+        {
+            var configuration = RavenConfiguration.CreateForTesting("foo", ResourceType.Database);
+            configuration.Initialize();
+
+            DefaultBackupConfiguration = configuration.Backup;
+        }
+
         protected EtlTestBase(ITestOutputHelper output) : base(output)
         {
         }

@@ -11,9 +11,9 @@ using Amazon.S3;
 using Amazon.S3.Model;
 using Raven.Client.Documents.Operations.Backups;
 using Raven.Client.Util;
-using Raven.Server.Config.Categories;
 using Raven.Server.Documents.PeriodicBackup.Restore;
 using Sparrow;
+using BackupConfiguration = Raven.Server.Config.Categories.BackupConfiguration;
 using Size = Sparrow.Size;
 
 namespace Raven.Server.Documents.PeriodicBackup.Aws
@@ -38,7 +38,7 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
         {
             if (s3Settings == null)
                 throw new ArgumentNullException(nameof(s3Settings));
-            if (configuration == null) 
+            if (configuration == null)
                 throw new ArgumentNullException(nameof(configuration));
 
             if (string.IsNullOrWhiteSpace(s3Settings.AwsAccessKey))
