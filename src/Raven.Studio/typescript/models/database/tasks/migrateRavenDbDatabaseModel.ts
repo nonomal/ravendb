@@ -166,7 +166,7 @@ class migrateRavenDbDatabaseModel {
             EnableBasicAuthenticationOverUnsecuredHttp: this.apiKey() ? this.enableBasicAuthenticationOverUnsecuredHttp() : false, 
             BuildMajorVersion: this.serverMajorVersion(),
             BuildVersion: this.buildVersion(),
-            SkipServerCertificateValidation: this.isSecuredConnection() ? this.skipServerCertificateValidation() : false
+            SkipServerCertificateValidation: this.skipServerCertificateValidation()
         };
     }
 
