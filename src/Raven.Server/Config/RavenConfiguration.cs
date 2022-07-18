@@ -45,6 +45,8 @@ namespace Raven.Server.Config
 
         public CoreConfiguration Core { get; }
 
+        public SecurityConfiguration Security { get; }
+
 #if !RVN
         public HttpConfiguration Http { get; }
 
@@ -56,7 +58,6 @@ namespace Raven.Server.Config
 
         public StorageConfiguration Storage { get; }
 
-        public SecurityConfiguration Security { get; }
 
         public BackupConfiguration Backup { get; }
 
@@ -93,6 +94,8 @@ namespace Raven.Server.Config
         public UpdatesConfiguration Updates { get; }
 
         public MigrationConfiguration Migration { get; }
+
+        public IntegrationsConfiguration Integrations { get;  }
 
         internal IConfigurationRoot ServerWideSettings { get; set; }
 
@@ -146,6 +149,7 @@ namespace Raven.Server.Config
             Notifications = new NotificationsConfiguration();
             Updates = new UpdatesConfiguration();
             Migration = new MigrationConfiguration();
+            Integrations = new IntegrationsConfiguration();
         }
 
         private void AddJsonConfigurationVariables(string customConfigPath = null)
@@ -205,6 +209,7 @@ namespace Raven.Server.Config
             Notifications.Initialize(Settings, settingsNames, ServerWideSettings, serverWideSettingsNames, ResourceType, ResourceName);
             Updates.Initialize(Settings, settingsNames, ServerWideSettings, serverWideSettingsNames, ResourceType, ResourceName);
             Migration.Initialize(Settings, settingsNames, ServerWideSettings, serverWideSettingsNames, ResourceType, ResourceName);
+            Integrations.Initialize(Settings, settingsNames, ServerWideSettings, serverWideSettingsNames, ResourceType, ResourceName);
 
             PostInit();
 

@@ -3,19 +3,26 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.WebSockets;
 using System.Threading;
 using System.Threading.Tasks;
 using FastTests.Server.Replication;
+using Raven.Client;
 using Raven.Client.Documents;
 using Raven.Client.Documents.Conventions;
 using Raven.Client.Documents.Operations.Backups;
 using Raven.Client.Documents.Operations.CompareExchange;
+using Raven.Client.Documents.Operations.Expiration;
 using Raven.Client.Documents.Session;
 using Raven.Client.Documents.Smuggler;
 using Raven.Client.Exceptions;
 using Raven.Client.Util;
 using Raven.Server;
+using Raven.Server.Config;
+using Sparrow.Extensions;
+using Sparrow.Logging;
 using Sparrow.Server;
+using Tests.Infrastructure.Utils;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -109,7 +116,7 @@ namespace RachisTests.DatabaseCluster
             Assert.Equal(2, exceptions.Count);
             foreach (var exception in exceptions)
             {
-                Assert.IsType<ConcurrencyException>(exception);
+                Assert.IsType<ClusterTransactionConcurrencyException>(exception);
             }
         }
 
@@ -207,7 +214,7 @@ namespace RachisTests.DatabaseCluster
                 }
 
                 var backupStatus = await source.Maintenance.SendAsync(new StartBackupOperation(false, backupTaskId));
-                await backupStatus.WaitForCompletionAsync();
+                await backupStatus.WaitForCompletionAsync(TimeSpan.FromMinutes(5));
 
                 using (var session = source.OpenAsyncSession(new SessionOptions { TransactionMode = TransactionMode.ClusterWide }))
                 {
@@ -221,7 +228,7 @@ namespace RachisTests.DatabaseCluster
                 }
 
                 var backupStatus2 = await source.Maintenance.SendAsync(new StartBackupOperation(false, backupTaskId));
-                await backupStatus2.WaitForCompletionAsync();
+                await backupStatus2.WaitForCompletionAsync(TimeSpan.FromMinutes(5));
 
                 using (var session = source.OpenAsyncSession(new SessionOptions { TransactionMode = TransactionMode.ClusterWide }))
                 {
@@ -234,16 +241,36 @@ namespace RachisTests.DatabaseCluster
                 }
 
                 var backupStatus3 = await source.Maintenance.SendAsync(new StartBackupOperation(false, backupTaskId));
-                await backupStatus3.WaitForCompletionAsync();
+                await backupStatus3.WaitForCompletionAsync(TimeSpan.FromMinutes(5));
 
                 await documentStore.Smuggler.ImportIncrementalAsync(new DatabaseSmugglerImportOptions(), Directory.GetDirectories(backupPath).First());
             }
 
-            await AssertClusterWaitForNotNull(nodes, documentStore.Database, async s =>
+            // await AssertClusterWaitForNotNull(nodes, documentStore.Database, async s =>
+            // {
+            //     using var session = s.OpenAsyncSession();
+            //     return await session.LoadAsync<TestObj>(notDelete);
+            // });
+            
+            //Additional information for investigating RavenDB-17823 
             {
-                using var session = s.OpenAsyncSession();
-                return await session.LoadAsync<TestObj>(notDelete);
-            });
+                var waitResults = await ClusterWaitForNotNull(nodes, documentStore.Database, async s =>
+                {
+                    using var session = s.OpenAsyncSession();
+                    return await session.LoadAsync<TestObj>(notDelete);
+                });
+                var nullCount = waitResults.Count(r => r == null);
+                if (nullCount != 0)
+                {
+                    var results = await ClusterWaitFor(nodes, documentStore.Database, async s =>
+                    {
+                        using var session = s.OpenAsyncSession();
+                        return (await session.LoadAsync<TestObj>(notDelete), await session.Query<TestObj>().CountAsync());
+                    });
+
+                    Assert.True(false, string.Join("\n", results.Select((r => $"is notDelete null:{r.Item1 == null}, actual count {r.Item2}, expected {count}"))));
+                }
+            }
 
             await AssertWaitForCountAsync(async () => await documentStore.Operations.SendAsync(new GetCompareExchangeValuesOperation<TestObj>("")), count + 1);
         }
@@ -276,7 +303,7 @@ namespace RachisTests.DatabaseCluster
                 }
 
                 var backupStatus = await source.Maintenance.SendAsync(new StartBackupOperation(false, backupTaskId));
-                await backupStatus.WaitForCompletionAsync();
+                await backupStatus.WaitForCompletionAsync(TimeSpan.FromMinutes(5));
 
                 using (var session = source.OpenAsyncSession(new SessionOptions { TransactionMode = TransactionMode.ClusterWide }))
                 {
@@ -292,7 +319,7 @@ namespace RachisTests.DatabaseCluster
                 }
 
                 var backupStatus2 = await source.Maintenance.SendAsync(new StartBackupOperation(false, backupTaskId));
-                await backupStatus2.WaitForCompletionAsync();
+                await backupStatus2.WaitForCompletionAsync(TimeSpan.FromMinutes(5));
 
                 await documentStore.Smuggler.ImportIncrementalAsync(new DatabaseSmugglerImportOptions(), Directory.GetDirectories(backupPath).First());
             }
@@ -335,7 +362,7 @@ namespace RachisTests.DatabaseCluster
                 }
 
                 var backupStatus = await source.Maintenance.SendAsync(new StartBackupOperation(false, backupTaskId));
-                await backupStatus.WaitForCompletionAsync();
+                await backupStatus.WaitForCompletionAsync(TimeSpan.FromMinutes(5));
 
                 using (var session = source.OpenAsyncSession(new SessionOptions { TransactionMode = TransactionMode.ClusterWide }))
                 {
@@ -352,7 +379,7 @@ namespace RachisTests.DatabaseCluster
                 }
 
                 var backupStatus2 = await source.Maintenance.SendAsync(new StartBackupOperation(false, backupTaskId));
-                await backupStatus2.WaitForCompletionAsync();
+                await backupStatus2.WaitForCompletionAsync(TimeSpan.FromMinutes(5));
 
                 await documentStore.Smuggler.ImportIncrementalAsync(new DatabaseSmugglerImportOptions(), Directory.GetDirectories(backupPath).First());
             }
@@ -463,6 +490,111 @@ namespace RachisTests.DatabaseCluster
             await task;
         }
 
+        [Fact]
+        public async Task ClusterWideTransaction_WhenSetExpirationAndExport_ShouldDeleteTheCompareExchangeAsWell()
+        {
+            var customSettings = new Dictionary<string, string> {[RavenConfiguration.GetKey(x => x.Cluster.CompareExchangeExpiredCleanupInterval)] = "1"};
+            using var server = GetNewServer(new ServerCreationOptions {CustomSettings = customSettings,});
+
+            using var source = GetDocumentStore();
+            using var dest = GetDocumentStore(new Options {Server = server});
+            await dest.Maintenance.SendAsync(new ConfigureExpirationOperation(new ExpirationConfiguration
+            {
+                Disabled = false,
+                DeleteFrequencyInSec = 1
+            }));
+            
+            const string id = "testObjs/0";
+            using (var session = source.OpenAsyncSession(new SessionOptions {TransactionMode = TransactionMode.ClusterWide}))
+            {
+                var entity = new TestObj();
+                await session.StoreAsync(entity, id);
+            
+                var expires = SystemTime.UtcNow.AddMinutes(-5);
+                session.Advanced.GetMetadataFor(entity)[Constants.Documents.Metadata.Expires] = expires.GetDefaultRavenFormat(isUtc: true);
+                await session.SaveChangesAsync();    
+            }
+
+            var operation = await source.Smuggler.ExportAsync(new DatabaseSmugglerExportOptions(), dest.Smuggler);
+            await operation.WaitForCompletionAsync(TimeSpan.FromMinutes(1));
+            
+            await AssertWaitForNullAsync(async () =>
+            {
+                using var session = dest.OpenAsyncSession(new SessionOptions { TransactionMode = TransactionMode.ClusterWide });
+                return await session.LoadAsync<TestObj>(id);
+            });
+
+            await AssertWaitForTrueAsync(async () =>
+            {
+                var compareExchangeValues = await dest.Operations.SendAsync(new GetCompareExchangeValuesOperation<object>(""));
+                return compareExchangeValues.Any() == false;
+            });
+        }
+
+        [Fact]
+        public async Task ClusterWideTransaction_WhenSetExpiration_ShouldDeleteTheCompareExchangeAsWell()
+        {
+            var customSettings = new Dictionary<string, string> {[RavenConfiguration.GetKey(x => x.Cluster.CompareExchangeExpiredCleanupInterval)] = "1"};
+            using var server = GetNewServer(new ServerCreationOptions {CustomSettings = customSettings,});
+            using var store = GetDocumentStore(new Options{Server = server});
+            await store.Maintenance.SendAsync(new ConfigureExpirationOperation(new ExpirationConfiguration
+            {
+                Disabled = false,
+                DeleteFrequencyInSec = 10
+            }));
+            
+            const string id = "testObjs/0";
+            using (var session = store.OpenAsyncSession(new SessionOptions {TransactionMode = TransactionMode.ClusterWide}))
+            {
+                var entity = new TestObj();
+                await session.StoreAsync(entity, id);
+            
+                var expires = SystemTime.UtcNow.AddMinutes(-5);
+                session.Advanced.GetMetadataFor(entity)[Constants.Documents.Metadata.Expires] = expires.GetDefaultRavenFormat(isUtc: true);
+                await session.SaveChangesAsync();    
+            }
+
+            await AssertWaitForNullAsync(async () =>
+            {
+                using var session = store.OpenAsyncSession(new SessionOptions { TransactionMode = TransactionMode.ClusterWide });
+                return await session.LoadAsync<TestObj>(id);
+            });
+
+            await AssertWaitForTrueAsync(async () =>
+            {
+                var compareExchangeValues = await store.Operations.SendAsync(new GetCompareExchangeValuesOperation<object>(""));
+                return compareExchangeValues.Any() == false;
+            });
+        }
+
+        [Fact]
+        public async Task ClusterWideTransaction_WhenDocumentRemovedByExpiration_ShouldAllowToCreateNewDocumentEvenIfItsCompareExchangeWasntRemoved()
+        {
+            using var store = GetDocumentStore();
+            await store.Maintenance.SendAsync(new ConfigureExpirationOperation(new ExpirationConfiguration {Disabled = false, DeleteFrequencyInSec = 1}));
+
+            const string id = "testObjs/0";
+            for (int i = 0; i < 5; i++)
+            {
+                await AssertWaitForNullAsync(async () =>
+                {
+                    using var session = store.OpenAsyncSession(new SessionOptions {TransactionMode = TransactionMode.ClusterWide});
+                    return await session.LoadAsync<TestObj>(id);
+                });
+                
+                using (var session = store.OpenAsyncSession(new SessionOptions {TransactionMode = TransactionMode.ClusterWide}))
+                {
+                    var entity = new TestObj();
+                    await session.StoreAsync(entity, id);
+
+                    var expires = SystemTime.UtcNow.AddMinutes(-5);
+                    session.Advanced.GetMetadataFor(entity)[Constants.Documents.Metadata.Expires] = expires.GetDefaultRavenFormat(isUtc: true);
+                
+                    await session.SaveChangesAsync();
+                }
+            }
+        }
+        
         private static IDisposable LocalGetDocumentStores(List<RavenServer> nodes, string database, out IDocumentStore[] stores)
         {
             var urls = nodes.Select(n => n.WebUrl).ToArray();
@@ -491,7 +623,7 @@ namespace RachisTests.DatabaseCluster
 
             for (int i = 0; i < urls.Length; i++)
             {
-                var store = new DocumentStore {Urls = new[] {urls[i]}, Database = database, Conventions = new DocumentConventions {DisableTopologyUpdates = true}}.Initialize();
+                var store = new DocumentStore { Urls = new[] { urls[i] }, Database = database, Conventions = new DocumentConventions { DisableTopologyUpdates = true } }.Initialize();
                 stores[i] = store;
             }
 

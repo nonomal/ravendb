@@ -77,13 +77,13 @@ namespace Raven.Server.Documents.Queries.Dynamic
             }
         }
 
-        public override Task<IndexEntriesQueryResult> ExecuteIndexEntriesQuery(IndexQueryServerSide query, QueryOperationContext queryContext, long? existingResultEtag, OperationCancelToken token)
+        public override Task<IndexEntriesQueryResult> ExecuteIndexEntriesQuery(IndexQueryServerSide query, QueryOperationContext queryContext, bool ignoreLimit, long? existingResultEtag, OperationCancelToken token)
         {
             throw new NotSupportedException("Collection query is handled directly by documents storage so index entries aren't created underneath");
         }
 
         public override Task ExecuteStreamIndexEntriesQuery(IndexQueryServerSide query, QueryOperationContext queryContext, HttpResponse response,
-            IStreamQueryResultWriter<BlittableJsonReaderObject> writer, OperationCancelToken token)
+            IStreamQueryResultWriter<BlittableJsonReaderObject> writer, bool ignoreLimit, OperationCancelToken token)
         {
             throw new NotSupportedException("Collection query is handled directly by documents storage so index entries aren't created underneath");
         }
@@ -113,7 +113,7 @@ namespace Raven.Server.Documents.Queries.Dynamic
             throw new NotSupportedException("Collection query is handled directly by documents storage so suggestions aren't supported");
         }
 
-        private async ValueTask ExecuteCollectionQueryAsync(QueryResultServerSide<Document> resultToFill, IndexQueryServerSide query, string collection, QueryOperationContext context, bool pulseReadingTransaction, CancellationToken cancellationToken)
+        private async ValueTask ExecuteCollectionQueryAsync(QueryResultServerSide<Document> resultToFill, IndexQueryServerSide query, string collection, QueryOperationContext context, bool pulseReadingTransaction, CancellationToken token)
         {
             using (var queryScope = query.Timings?.For(nameof(QueryTimingsScope.Names.Query)))
             {
@@ -141,13 +141,15 @@ namespace Raven.Server.Documents.Queries.Dynamic
 
                 var totalResults = new Reference<int>();
                 var skippedResults = new Reference<long>();
+                var scannedResults = new Reference<int>();
                 IEnumerator<Document> enumerator;
 
                 if (pulseReadingTransaction == false)
                 {
-                    var documents = new CollectionQueryEnumerable(Database, Database.DocumentsStorage, fieldsToFetch, collection, query, queryScope, context.Documents, includeDocumentsCommand, includeRevisionsCommand: includeRevisionsCommand, includeCompareExchangeValuesCommand, totalResults);
-                    
-                    documents.SkippedResults = skippedResults;
+                    var documents = new CollectionQueryEnumerable(Database, Database.DocumentsStorage, fieldsToFetch, collection, query, queryScope, context.Documents,
+                        includeDocumentsCommand, includeRevisionsCommand: includeRevisionsCommand,
+                        includeCompareExchangeValuesCommand: includeCompareExchangeValuesCommand, totalResults: totalResults, scannedResults, skippedResults, token);
+
                     enumerator = documents.GetEnumerator();
                 }
                 else
@@ -157,7 +159,9 @@ namespace Raven.Server.Documents.Queries.Dynamic
                         {
                             query.Start = state.Start;
                             query.PageSize = state.Take;
-                            var documents = new CollectionQueryEnumerable(Database, Database.DocumentsStorage, fieldsToFetch, collection, query, queryScope, context.Documents, includeDocumentsCommand, includeRevisionsCommand, includeCompareExchangeValuesCommand, totalResults);
+                            var documents = new CollectionQueryEnumerable(Database, Database.DocumentsStorage, fieldsToFetch, collection, query, queryScope,
+                                context.Documents, includeDocumentsCommand, includeRevisionsCommand, includeCompareExchangeValuesCommand, totalResults, scannedResults,
+                                skippedResults, token);
 
                             return documents;
                         },
@@ -202,9 +206,9 @@ namespace Raven.Server.Documents.Queries.Dynamic
                         {
                             var document = enumerator.Current;
 
-                            cancellationToken.ThrowIfCancellationRequested();
+                            token.ThrowIfCancellationRequested();
 
-                            await resultToFill.AddResultAsync(document, cancellationToken);
+                            await resultToFill.AddResultAsync(document, token);
 
                             using (gatherScope?.Start())
                             {
@@ -226,7 +230,7 @@ namespace Raven.Server.Documents.Queries.Dynamic
                     if (resultToFill.SupportsExceptionHandling == false)
                         throw;
 
-                    await resultToFill.HandleExceptionAsync(e, cancellationToken);
+                    await resultToFill.HandleExceptionAsync(e, token);
                 }
 
                 using (fillScope?.Start())
@@ -252,6 +256,7 @@ namespace Raven.Server.Documents.Queries.Dynamic
                 resultToFill.TotalResults = (totalResults.Value == 0 && resultToFill.Results.Count != 0) ? -1 : totalResults.Value;
                 resultToFill.LongTotalResults = resultToFill.TotalResults;
                 resultToFill.SkippedResults = Convert.ToInt32(skippedResults.Value);
+                resultToFill.ScannedResults = scannedResults.Value;
 
                 if (query.Offset != null || query.Limit != null)
                 {

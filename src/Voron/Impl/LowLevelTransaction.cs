@@ -114,7 +114,14 @@ namespace Voron.Impl
             }
         }
         public event Action<IPagerLevelTransactionState> OnDispose;
-        public event Action<LowLevelTransaction> AfterCommitWhenNewReadTransactionsPrevented;
+        
+        /// <summary>
+        /// This is called *under the write transaction lock* and will
+        /// allow us to clean up any in memory state that shouldn't be preserved
+        /// passed the transaction rollback
+        /// </summary>
+        public event Action<IPagerLevelTransactionState> OnRollBack;
+        public event Action<LowLevelTransaction> AfterCommitWhenNewTransactionsPrevented;
 
         private readonly IFreeSpaceHandling _freeSpaceHandling;
         internal FixedSizeTree _freeSpaceTree;
@@ -1223,6 +1230,8 @@ namespace Voron.Impl
             if (Committed || RolledBack || Flags != (TransactionFlags.ReadWrite))
                 return;
 
+            OnRollBack?.Invoke(this);
+
             ValidateReadOnlyPages();
 
             foreach (var pageFromScratch in _transactionPages)
@@ -1296,11 +1305,11 @@ namespace Voron.Impl
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal void OnAfterCommitWhenNewReadTransactionsPrevented()
+        internal void OnAfterCommitWhenNewTransactionsPrevented()
         {
             // the event cannot be called outside this class while we need to call it in 
             // StorageEnvironment.TransactionAfterCommit
-            AfterCommitWhenNewReadTransactionsPrevented?.Invoke(this);
+            AfterCommitWhenNewTransactionsPrevented?.Invoke(this);
         }
 
 

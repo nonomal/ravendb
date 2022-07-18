@@ -55,6 +55,8 @@ namespace Raven.Client
             public const string ContentEncoding = "Content-Encoding";
 
             public const string ContentLength = "Content-Length";
+
+            public const string IncrementalTimeSeriesPrefix = "INC:";
         }
 
         public class Platform
@@ -118,6 +120,15 @@ namespace Raven.Client
 
             public const string Prefix = "certificates/";
             public const int MaxNumberOfCertsWithSameHash = 5;
+        }
+        
+        internal class Network
+        {
+            public const string AnyIp = "0.0.0.0";
+            public const int ZeroValue = 0;
+            public const int DefaultSecuredRavenDbHttpPort = 443;
+            public const int DefaultUnsecuredRavenDbHttpPort = 8080;
+            public const int DefaultSecuredRavenDbTcpPort = 38888;
         }
 
         internal class DatabaseSettings
@@ -230,6 +241,8 @@ namespace Raven.Client
             public class Collections
             {
                 public const string AllDocumentsCollection = "@all_docs";
+
+                public const string EmptyCollection = "@empty";
             }
 
             public class Indexing
@@ -330,6 +343,11 @@ namespace Raven.Client
 
                     public const string AllResults = "@AllResults";
                 }
+
+                internal class Fields
+                {
+                    internal const string PowerBIJsonFieldName = "json()";
+                }
             }
 
             public class Encryption
@@ -380,7 +398,7 @@ namespace Raven.Client
                 public const string Size = "@raven-blob-size";
             }
         }
-
+        
         internal static class Smuggler
         {
             public const string ImportOptions = "importOptions";
@@ -425,9 +443,9 @@ namespace Raven.Client
                 {
                 }
 
-                public string DocumentChangeVector;
+                public const string DocumentChangeVector = null;
 
-                public string DestinationDocumentChangeVector;
+                public const string DestinationDocumentChangeVector = null;
             }
         }
     }

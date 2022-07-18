@@ -11,7 +11,9 @@ namespace Raven.Client.Documents.Smuggler
 {
     public class SmugglerResult : SmugglerProgressBase, IOperationResult
     {
-        private readonly List<string> _messages;
+        private readonly object _locker = new();
+
+        private List<string> _messages;
         protected SmugglerProgress _progress;
         private readonly Stopwatch _sw;
 
@@ -50,7 +52,24 @@ namespace Raven.Client.Documents.Smuggler
 
         public IOperationProgress Progress => _progress;
 
-        public IReadOnlyList<string> Messages => _messages;
+        public IReadOnlyList<string> Messages
+        {
+            get
+            {
+                lock (_locker)
+                {
+                    return _messages.ToArray();
+                }
+            }
+
+            set
+            {
+                lock (_locker)
+                {
+                    _messages = value.ToList();
+                }
+            }
+        }
 
         public void AddWarning(string message)
         {
@@ -71,7 +90,7 @@ namespace Raven.Client.Documents.Smuggler
         {
             Message = message;
 
-            lock (this)
+            lock (_locker)
             {
                 _messages.Add(Message);
             }
@@ -81,7 +100,7 @@ namespace Raven.Client.Documents.Smuggler
         {
             Message = $"[{SystemTime.UtcNow:T} {type}] {message}";
 
-            lock (this)
+            lock (_locker)
             {
                 _messages.Add(Message);
             }
@@ -93,10 +112,7 @@ namespace Raven.Client.Documents.Smuggler
 
             var json = base.ToJson();
 
-            lock (this)
-            {
-                json[nameof(Messages)] = Messages.ToList();
-            }
+            json[nameof(Messages)] = Messages;
 
             json[nameof(Elapsed)] = Elapsed;
 
@@ -276,6 +292,8 @@ namespace Raven.Client.Documents.Smuggler
 
             public bool ElasticSearchConnectionStringsUpdated { get; set; }
 
+            public bool PostreSQLConfigurationUpdated { get; set; }
+
             public override DynamicJsonValue ToJson()
             {
                 var json = base.ToJson();
@@ -348,6 +366,9 @@ namespace Raven.Client.Documents.Smuggler
 
                 if (ElasticSearchEtlsUpdated)
                     json[nameof(ElasticSearchEtlsUpdated)] = ElasticSearchEtlsUpdated;
+
+                if (PostreSQLConfigurationUpdated)
+                    json[nameof(PostreSQLConfigurationUpdated)] = PostreSQLConfigurationUpdated;
 
                 return json;
             }
@@ -423,6 +444,10 @@ namespace Raven.Client.Documents.Smuggler
 
                 if (ElasticSearchEtlsUpdated)
                     sb.AppendLine("- ElasticSearch ETLs");
+
+                if (PostreSQLConfigurationUpdated)
+                    sb.AppendLine("- PostgreSQL Integration");
+
 
                 if (sb.Length == 0)
                     return string.Empty;

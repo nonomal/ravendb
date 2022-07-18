@@ -39,7 +39,7 @@ namespace SlowTests.Issues
                     Name = "MyIndex"
                 }}));
                 var indexResult = result[0];
-                await WaitForRaftIndexToBeAppliedInCluster(indexResult.RaftCommandIndex, TimeSpan.FromSeconds(15));
+                await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(indexResult.RaftCommandIndex, TimeSpan.FromSeconds(15));
                 foreach (var server in Servers)
                 {
                     documentDatabase = await server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(database);
@@ -86,7 +86,7 @@ namespace SlowTests.Issues
                     Name = "MyIndex"
                 }}));
                 var indexResult = result[0];
-                await WaitForRaftIndexToBeAppliedInCluster(indexResult.RaftCommandIndex, TimeSpan.FromSeconds(15));
+                await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(indexResult.RaftCommandIndex, TimeSpan.FromSeconds(15));
 
                 await RollingIndexesClusterTests.WaitForRollingIndex(database, "MyIndex", Servers[0]);
                 documentDatabase = await Servers[0].ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(database);
@@ -99,21 +99,12 @@ namespace SlowTests.Issues
                 index.SetState(IndexState.Error);
 
                 var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
-                record.Topology.Members.Remove(Servers[2].ServerStore.NodeTag);
+                Assert.True(record.Topology.Members.Remove(Servers[2].ServerStore.NodeTag));
                 record.Topology.Rehabs.Add(Servers[2].ServerStore.NodeTag);
                 await store.Maintenance.Server.SendAsync(new UpdateDatabaseOperation(record, record.Etag));
 
-                var rehabs = await WaitForValueAsync(async () => await GetRehabCount(store, store.Database), 1);
-                Assert.Equal(1, rehabs);
-
-                var val = await WaitForValueAsync(async () => await GetMembersCount(store, database), 2);
-                Assert.Equal(2, val);
-
-                val = await WaitForValueAsync(async () => await GetMembersCount(store, store.Database), 3);
-                Assert.Equal(3, val);
-
-                rehabs = await WaitForValueAsync(async () => await GetRehabCount(store, store.Database), 0);
-                Assert.Equal(0, rehabs);
+                await WaitAndAssertForValueAsync(async () => await GetMembersAndRehabsCount(store), expectedVal: (MembersCount: 2, RehabsCount: 1));
+                await WaitAndAssertForValueAsync(async () => await GetMembersAndRehabsCount(store), expectedVal: (MembersCount: 3, RehabsCount: 0));
             }
         }
 
@@ -136,7 +127,7 @@ namespace SlowTests.Issues
                     Name = "MyIndex"
                 }}));
                 var indexResult = result[0];
-                await WaitForRaftIndexToBeAppliedInCluster(indexResult.RaftCommandIndex, TimeSpan.FromSeconds(15));
+                await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(indexResult.RaftCommandIndex, TimeSpan.FromSeconds(15));
 
                 await RollingIndexesClusterTests.WaitForRollingIndex(database, "MyIndex", Servers[2]);
                 var index = documentDatabase.IndexStore.GetIndex("MyIndex");
@@ -177,7 +168,7 @@ namespace SlowTests.Issues
                     Name = "MyIndex"
                 }}));
                 var indexResult = result[0];
-                await WaitForRaftIndexToBeAppliedInCluster(indexResult.RaftCommandIndex, TimeSpan.FromSeconds(15));
+                await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(indexResult.RaftCommandIndex, TimeSpan.FromSeconds(15));
                 await RollingIndexesClusterTests.WaitForRollingIndex(database, "MyIndex", Servers[2]);
                 var index = documentDatabase.IndexStore.GetIndex("MyIndex");
                 index.SetState(IndexState.Error);
@@ -229,6 +220,13 @@ namespace SlowTests.Issues
                 return -1;
             }
             return res.Topology.Rehabs.Count;
+        }
+
+        internal static async Task<(int MembersCount, int RehabsCount)> GetMembersAndRehabsCount(IDocumentStore store)
+        {
+            var dbRecord = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
+            var topology = dbRecord.Topology;
+            return (topology.Members.Count, topology.Rehabs.Count);
         }
     }
 }

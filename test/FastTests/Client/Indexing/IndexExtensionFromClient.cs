@@ -36,7 +36,7 @@ namespace FastTests.Client.Indexing
                     var p = new Person() { Name = "Methuselah", Age = 969 };
                     session.Store(p);
                     session.SaveChanges();
-                    WaitForIndexing(store);
+                    Indexes.WaitForIndexing(store);
                     var query = session.Query<PeopleByEmail.PeopleByEmailResult, PeopleByEmail>()
                         .Where(x => x.Email == PeopleUtil.CalculatePersonEmail(p.Name, p.Age)).OfType<Person>().Single();
                 }
@@ -115,7 +115,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -169,7 +169,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -213,7 +213,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -257,7 +257,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -312,7 +312,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -367,7 +367,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -407,7 +407,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -447,7 +447,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -489,7 +489,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -546,7 +546,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -590,12 +590,12 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
-                    var indexErrors = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { index.IndexName }));
-                    Assert.Equal(0, indexErrors[0].Errors.Length);
+                    var indexErrors = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                    Assert.Null(indexErrors);
 
                     var person = session.Query<Person, PeopleIndex11>()
                         .Single(p => p.Friends.Contains("ayende"));
@@ -629,12 +629,12 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
-                    var indexErrors = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { index.IndexName }));
-                    Assert.Equal(0, indexErrors[0].Errors.Length);
+                    var indexErrors = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                    Assert.Null(indexErrors);
 
                     var combined = session.Query<PeopleIndex12.Result, PeopleIndex12>()
                         .Select(p => p.Combined)
@@ -673,16 +673,15 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
-                    var indexErrors = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { index.IndexName }));
-                    Assert.Equal(0, indexErrors[0].Errors.Length);
+                    var indexErrors = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                    Assert.Null(indexErrors);
 
                     var person = session.Query<Person, PeopleIndex13>().Single();
                     Assert.Equal("aviv", person.Name);
-
                 }
             }
         }
@@ -719,12 +718,12 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
-                    var indexErrors = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { index.IndexName }));
-                    Assert.Equal(0, indexErrors[0].Errors.Length);
+                    var indexErrors = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                    Assert.Null(indexErrors);
 
                     var person = session.Query<Person, PeopleIndex14>().Single();
 
@@ -765,12 +764,12 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
-                    var indexErrors = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { index.IndexName }));
-                    Assert.Equal(0, indexErrors[0].Errors.Length);
+                    var indexErrors = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                    Assert.Null(indexErrors);
 
                     var person = session.Query<Person, PeopleIndex15>().Single();
 
@@ -812,7 +811,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -857,7 +856,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -902,7 +901,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -945,7 +944,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -985,7 +984,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -1024,7 +1023,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {
@@ -1058,7 +1057,7 @@ namespace My.Crazy.Namespace
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {

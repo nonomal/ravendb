@@ -1,10 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using Lucene.Net.Index;
 using Lucene.Net.Search;
 using Lucene.Net.Store;
 using Lucene.Net.Util;
+using Sparrow.Utils;
+using Constants = Raven.Client.Constants;
+using NativeMemory = Sparrow.Utils.NativeMemory;
 
 namespace Raven.Server.Documents.Queries.Sorting.AlphaNumeric
 {
@@ -15,6 +20,23 @@ namespace Raven.Server.Documents.Queries.Sorting.AlphaNumeric
         private UnmanagedStringArray.UnmanagedString _bottom;
         private int[] _order;
         private UnmanagedStringArray _lookup;
+        private static readonly UnmanagedStringArray.UnmanagedString NullValue = GetNullValueUnmanagedString();
+
+        private static unsafe UnmanagedStringArray.UnmanagedString GetNullValueUnmanagedString()
+        {
+            var size = sizeof(short) + Encoding.UTF8.GetByteCount(Constants.Documents.Indexing.Fields.NullValue);
+            byte* bytes = NativeMemory.AllocateMemory(size); // single allocation, we never free it
+            fixed (char* chars = Constants.Documents.Indexing.Fields.NullValue)
+            {
+                *(short*)bytes = (short)Encoding.UTF8.GetBytes(chars, Constants.Documents.Indexing.Fields.NullValue.Length,
+                    bytes + sizeof(short), size - sizeof(short));
+            }
+            
+            return new UnmanagedStringArray.UnmanagedString
+            {
+                Start = bytes
+            };
+        }
 
         public AlphaNumericFieldComparator(string field, int numHits)
         {
@@ -27,12 +49,17 @@ namespace Raven.Server.Documents.Queries.Sorting.AlphaNumeric
             var str1 = _values[slot1];
             var str2 = _values[slot2];
 
-            if (str1.IsNull)
-                return str2.IsNull ? 0 : -1;
-            if (str2.IsNull)
+            if (IsNull(str1))
+                return IsNull(str2) ? 0 : -1;
+            if (IsNull(str2))
                 return 1;
 
             return AlphanumComparer.Instance.Compare(str1, str2);
+        }
+
+        private static bool IsNull(UnmanagedStringArray.UnmanagedString str1)
+        {
+            return str1.IsNull|| UnmanagedStringArray.UnmanagedString.CompareOrdinal(str1, NullValue) == 0;
         }
 
         public override void SetBottom(int slot)
@@ -43,9 +70,9 @@ namespace Raven.Server.Documents.Queries.Sorting.AlphaNumeric
         public override int CompareBottom(int doc, IState state)
         {
             var str2 = _lookup[_order[doc]];
-            if (_bottom.IsNull)
-                return str2.IsNull ? 0 : -1;
-            if (str2.IsNull)
+            if (IsNull(_bottom))
+                return IsNull(str2) ? 0 : -1;
+            if (IsNull(str2))
                 return 1;
 
             return AlphanumComparer.Instance.Compare(_bottom, str2);
@@ -256,16 +283,9 @@ namespace Raven.Server.Documents.Queries.Sorting.AlphaNumeric
 
             public int Compare(UnmanagedStringArray.UnmanagedString string1, UnmanagedStringArray.UnmanagedString string2)
             {
-                if (string1.IsNull)
-                {
-                    return 0;
-                }
-
-                if (string2.IsNull)
-                {
-                    return 0;
-                }
-
+                Debug.Assert(string1.IsNull == false);
+                Debug.Assert(string2.IsNull == false);
+                
                 var string1State = new AlphanumericStringComparisonState(string1);
                 var string2State = new AlphanumericStringComparisonState(string2);
 

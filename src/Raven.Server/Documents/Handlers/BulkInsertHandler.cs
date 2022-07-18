@@ -189,6 +189,7 @@ namespace Raven.Server.Documents.Handlers
             catch (Exception e)
             {
                 HttpContext.Response.Headers["Connection"] = "close";
+
                 throw new InvalidOperationException("Failed to process bulk insert. " + progress, e);
             }
         }
@@ -228,7 +229,6 @@ namespace Raven.Server.Documents.Handlers
             }
 
             using (Database.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext ctx))
-            using (ctx.OpenWriteTransaction())
             {
                 attachmentStream.Hash = await AttachmentsStorageHelper.CopyStreamToFileAndCalculateHash(ctx, stream, attachmentStream.Stream, Database.DatabaseShutdown);
                 await attachmentStream.Stream.FlushAsync();
@@ -343,21 +343,21 @@ namespace Raven.Server.Documents.Handlers
                             {
                                 if (SkipOverwriteIfUnchanged)
                                 {
-                                     var existingDoc = Database.DocumentsStorage.Get(context, cmd.Id, DocumentFields.Data, throwOnConflict: false);
-                                     if (existingDoc != null)
-                                     {
-                                         var compareResult = DocumentCompare.IsEqualTo(existingDoc.Data, cmd.Document,
-                                             DocumentCompare.DocumentCompareOptions.MergeMetadata);
+                                    var existingDoc = Database.DocumentsStorage.Get(context, cmd.Id, DocumentFields.Data, throwOnConflict: false);
+                                    if (existingDoc != null)
+                                    {
+                                        var compareResult = DocumentCompare.IsEqualTo(existingDoc.Data, cmd.Document,
+                                            DocumentCompare.DocumentCompareOptions.MergeMetadata);
 
-                                         if (compareResult.HasFlag(DocumentCompareResult.Equal))
-                                         {
-                                             Debug.Assert(BitOperations.PopCount((ulong)compareResult) == 1 ||
-                                                          compareResult.HasFlag(DocumentCompareResult.AttachmentsNotEqual) ||
-                                                          compareResult.HasFlag(DocumentCompareResult.CountersNotEqual) ||
-                                                          compareResult.HasFlag(DocumentCompareResult.TimeSeriesNotEqual));
-                                             continue;
-                                         }
-                                     }
+                                        if (compareResult.HasFlag(DocumentCompareResult.Equal))
+                                        {
+                                            Debug.Assert(BitOperations.PopCount((ulong)compareResult) == 1 ||
+                                                         compareResult.HasFlag(DocumentCompareResult.AttachmentsNotEqual) ||
+                                                         compareResult.HasFlag(DocumentCompareResult.CountersNotEqual) ||
+                                                         compareResult.HasFlag(DocumentCompareResult.TimeSeriesNotEqual));
+                                            continue;
+                                        }
+                                    }
                                 }
 
                                 Database.DocumentsStorage.Put(context, cmd.Id, null, cmd.Document);

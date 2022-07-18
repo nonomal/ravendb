@@ -90,6 +90,8 @@ namespace Raven.Server.Documents.Replication
 
         private HubInfoForCleaner _hubInfoForCleaner;
 
+        public event Action<IncomingReplicationHandler, int> AttachmentStreamsReceived;
+
         private class HubInfoForCleaner
         {
             public long LastEtag;
@@ -548,6 +550,7 @@ namespace Raven.Server.Documents.Replication
 
                         instance.Failed -= RetryPullReplication;
                         instance.DocumentsReceived -= OnIncomingReceiveSucceeded;
+                        instance.AttachmentStreamsReceived -= OnAttachmentStreamsReceived;
                         if (_log.IsInfoEnabled)
                             _log.Info($"Pull replication Sink handler has thrown an unhandled exception. ({instance.FromToString})", e);
                     }
@@ -556,6 +559,11 @@ namespace Raven.Server.Documents.Replication
                     AddAndStartOutgoingReplication(destination, true);
                 }
             }
+        }
+
+        private void OnAttachmentStreamsReceived(IncomingReplicationHandler source, int attachmentsStreamCount)
+        {
+            AttachmentStreamsReceived?.Invoke(source, attachmentsStreamCount);
         }
 
         private void CreateIncomingInstance(TcpConnectionOptions tcpConnectionOptions, JsonOperationContext.MemoryBuffer buffer, PullReplicationParams pullReplicationParams)
@@ -611,9 +619,11 @@ namespace Raven.Server.Documents.Replication
                 getLatestEtagMessage,
                 this,
                 buffer,
+                getLatestEtagMessage.ReplicationsType,
                 incomingPullParams);
 
             newIncoming.DocumentsReceived += OnIncomingReceiveSucceeded;
+            newIncoming.AttachmentStreamsReceived += OnAttachmentStreamsReceived;
             return newIncoming;
         }
 
@@ -636,7 +646,7 @@ namespace Raven.Server.Documents.Replication
                 if (_log.IsInfoEnabled)
                 {
                     _log.Info(
-                        $"GetLastEtag: {getLatestEtagMessage.SourceTag}({getLatestEtagMessage.SourceMachineName}) / {getLatestEtagMessage.SourceDatabaseName} ({getLatestEtagMessage.SourceDatabaseId}) - {getLatestEtagMessage.SourceUrl}");
+                        $"GetLastEtag: {getLatestEtagMessage.SourceTag}({getLatestEtagMessage.SourceMachineName}) / {getLatestEtagMessage.SourceDatabaseName} ({getLatestEtagMessage.SourceDatabaseId}) - {getLatestEtagMessage.SourceUrl}. Type: {getLatestEtagMessage.ReplicationsType}");
                 }
             }
 
@@ -1293,10 +1303,12 @@ namespace Raven.Server.Documents.Replication
                     NodeTag = _clusterTopology.TryGetNodeTagByUrl(r).NodeTag,
                     Url = r,
                     Database = Database.Name
-                });
+                }).ToList();
 
                 DropOutgoingConnections(removed, instancesToDispose);
+                DropIncomingConnections(removed, instancesToDispose);
             }
+
             if (internalConnections.AddedDestinations.Count > 0)
             {
                 var added = internalConnections.AddedDestinations.Select(r => new InternalReplication
@@ -1674,6 +1686,22 @@ namespace Raven.Server.Documents.Replication
             return (null, OngoingTaskConnectionStatus.NotActive);
         }
 
+        public (string Url, OngoingTaskConnectionStatus Status) GetPullReplicationDestination(long taskId, string db)
+        {
+            //outgoing connections have the same task id per pull replication
+            foreach (var outgoing in OutgoingConnections)
+            {
+                if (outgoing is ExternalReplication ex && ex.TaskId == taskId && db.Equals(outgoing.Database, StringComparison.OrdinalIgnoreCase))
+                    return (ex.Url, OngoingTaskConnectionStatus.Active);
+            }
+            foreach (var reconnect in ReconnectQueue)
+            {
+                if (reconnect is ExternalReplication ex && ex.TaskId == taskId && db.Equals(reconnect.Database, StringComparison.OrdinalIgnoreCase))
+                    return (ex.Url, OngoingTaskConnectionStatus.Reconnect);
+            }
+            return (null, OngoingTaskConnectionStatus.NotActive);
+        }
+
         private void OnIncomingReceiveFailed(IncomingReplicationHandler instance, Exception e)
         {
             using (instance)
@@ -1683,6 +1711,7 @@ namespace Raven.Server.Documents.Replication
 
                 instance.Failed -= OnIncomingReceiveFailed;
                 instance.DocumentsReceived -= OnIncomingReceiveSucceeded;
+                instance.AttachmentStreamsReceived -= OnAttachmentStreamsReceived;
 
                 if (_log.IsInfoEnabled)
                     _log.Info($"Incoming replication handler has thrown an unhandled exception. ({instance.FromToString})", e);
@@ -1826,6 +1855,9 @@ namespace Raven.Server.Documents.Replication
                     break;
                 case ITombstoneAware.TombstoneType.TimeSeries:
                     result.Add(Constants.TimeSeries.All, minEtag);
+                    break;
+                case ITombstoneAware.TombstoneType.Counters:
+                    result.Add(Constants.Counters.All, minEtag);
                     break;
                 default:
                     throw new NotSupportedException($"Tombstone type '{tombstoneType}' is not supported.");

@@ -95,7 +95,8 @@ namespace FastTests.Server.Documents.Indexing.Auto
                 {
                     Name = "Name2",
                     Storage = FieldStorage.No,
-                    Indexing = AutoFieldIndexing.Default | AutoFieldIndexing.Search
+                    Indexing = AutoFieldIndexing.Default | AutoFieldIndexing.Search,
+                    HasQuotedName = true
                 };
 
                 var index2 = await database.IndexStore.CreateIndex(new AutoMapIndexDefinition("Users", new[] { name2 }), Guid.NewGuid().ToString());
@@ -132,6 +133,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
                 Assert.Equal("Users", indexes[1].Definition.Collections.Single());
                 Assert.Equal(1, indexes[1].Definition.MapFields.Count);
                 Assert.Equal("Name2", indexes[1].Definition.MapFields["Name2"].Name);
+                Assert.True(((AutoIndexField)indexes[1].Definition.MapFields["Name2"]).HasQuotedName);
                 Assert.Equal(AutoFieldIndexing.Search | AutoFieldIndexing.Default, indexes[1].Definition.MapFields["Name2"].As<AutoIndexField>().Indexing);
                 Assert.Equal(IndexLockMode.Unlock, indexes[1].Definition.LockMode);
                 Assert.Equal(IndexPriority.Low, indexes[1].Definition.Priority);
@@ -156,7 +158,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
                 await database.IndexStore.CreateIndex(
                     def1, Guid.NewGuid().ToString());
             var path1 = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath,
-                IndexDefinitionBase.GetIndexNameSafeForFileSystem(def1.Name));
+                IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(def1.Name));
 
             if (database.Configuration.Core.RunInMemory == false)
                 Assert.True(Directory.Exists(path1));
@@ -166,7 +168,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
                 await database.IndexStore.CreateIndex(
                     def2, Guid.NewGuid().ToString());
             var path2 = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath,
-                IndexDefinitionBase.GetIndexNameSafeForFileSystem(def2.Name));
+                IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(def2.Name));
 
             if (database.Configuration.Core.RunInMemory == false)
                 Assert.True(Directory.Exists(path2));
@@ -208,7 +210,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
             var index1 = await database.IndexStore.CreateIndex(def1, Guid.NewGuid().ToString());
 
             var path1 = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath,
-                IndexDefinitionBase.GetIndexNameSafeForFileSystem(def1.Name));
+                IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(def1.Name));
 
             if (database.Configuration.Core.RunInMemory == false)
                 Assert.True(Directory.Exists(path1));
@@ -216,7 +218,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
             var def2 = new AutoMapIndexDefinition("Users", new[] { new AutoIndexField { Name = "Name2" } });
             var index2 = await database.IndexStore.CreateIndex(def2, Guid.NewGuid().ToString());
             var path2 = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath,
-                IndexDefinitionBase.GetIndexNameSafeForFileSystem(def2.Name));
+                IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(def2.Name));
 
             if (database.Configuration.Core.RunInMemory == false)
                 Assert.True(Directory.Exists(path2));
@@ -225,7 +227,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
             Assert.Equal(2, indexesAfterReset.Count());
 
             var index3 = database.IndexStore.ResetIndex(index1.Name);
-            var path3 = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath, IndexDefinitionBase.GetIndexNameSafeForFileSystem(def1.Name));
+            var path3 = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath, IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(def1.Name));
 
             if (database.Configuration.Core.RunInMemory == false)
                 Assert.True(Directory.Exists(path3));
@@ -235,7 +237,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
             Assert.Equal(2, indexes.Count);
 
             var index4 = database.IndexStore.ResetIndex(index2.Name);
-            var path4 = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath, IndexDefinitionBase.GetIndexNameSafeForFileSystem(def2.Name));
+            var path4 = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath, IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(def2.Name));
 
             if (database.Configuration.Core.RunInMemory == false)
                 Assert.True(Directory.Exists(path4));
@@ -996,7 +998,8 @@ namespace FastTests.Server.Documents.Indexing.Auto
                             }
                         }
                     };
-                    await Server.ServerStore.Observer.CleanUpUnusedAutoIndexes(state);
+
+                    await CleanupUnusedAutoIndexes(state);
                 }
 
                 WaitForIndexDeletion(database, index0.Name);
@@ -1062,7 +1065,9 @@ namespace FastTests.Server.Documents.Indexing.Auto
                             }
                         }
                     };
-                    await Server.ServerStore.Observer.CleanUpUnusedAutoIndexes(state); // nothing should happen because difference between querying time between those two indexes is less than TimeToWaitBeforeMarkingAutoIndexAsIdle
+
+                    // nothing should happen because difference between querying time between those two indexes is less than TimeToWaitBeforeMarkingAutoIndexAsIdle
+                    await CleanupUnusedAutoIndexes(state);
                 }
 
                 WaitForIndex(database, index1.Name, index => index.State == IndexState.Normal);
@@ -1122,7 +1127,9 @@ namespace FastTests.Server.Documents.Indexing.Auto
                             }
                         }
                     };
-                    await Server.ServerStore.Observer.CleanUpUnusedAutoIndexes(state); // this will mark index2 as idle, because the difference between two indexes and index last querying time is more than TimeToWaitBeforeMarkingAutoIndexAsIdle
+
+                    // this will mark index2 as idle, because the difference between two indexes and index last querying time is more than TimeToWaitBeforeMarkingAutoIndexAsIdle
+                    await CleanupUnusedAutoIndexes(state);
                 }
 
                 WaitForIndex(database, index1.Name, index => index.State == IndexState.Normal);
@@ -1182,7 +1189,9 @@ namespace FastTests.Server.Documents.Indexing.Auto
                             }
                         }
                     };
-                    await Server.ServerStore.Observer.CleanUpUnusedAutoIndexes(state); // should not remove anything, age will be greater than 2x TimeToWaitBeforeMarkingAutoIndexAsIdle but less than TimeToWaitBeforeDeletingAutoIndexMarkedAsIdle
+
+                    // should not remove anything, age will be greater than 2x TimeToWaitBeforeMarkingAutoIndexAsIdle but less than TimeToWaitBeforeDeletingAutoIndexMarkedAsIdle
+                    await CleanupUnusedAutoIndexes(state);
                 }
 
                 WaitForIndex(database, index1.Name, index => index.State == IndexState.Idle);
@@ -1242,11 +1251,22 @@ namespace FastTests.Server.Documents.Indexing.Auto
                             }
                         }
                     };
-                    await Server.ServerStore.Observer.CleanUpUnusedAutoIndexes(state); // this will delete indexes
+
+                    // this will delete indexes
+                    await CleanupUnusedAutoIndexes(state);
                 }
 
                 WaitForIndexDeletion(database, index1.Name);
                 WaitForIndexDeletion(database, index2.Name);
+            }
+        }
+
+        private async Task CleanupUnusedAutoIndexes(ClusterObserver.DatabaseObservationState state)
+        {
+            var indexCleanupCommands = Server.ServerStore.Observer.GetUnusedAutoIndexes(state);
+            foreach (var (cmd, _) in indexCleanupCommands)
+            {
+                await Server.ServerStore.Engine.PutAsync(cmd);
             }
         }
 
@@ -1322,7 +1342,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
                 indexName = index.Name;
 
                 indexStoragePath = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath,
-                    IndexDefinitionBase.GetIndexNameSafeForFileSystem(indexName));
+                    IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(indexName));
 
                 Server.ServerStore.DatabasesLandlord.UnloadDirectly(dbName);
 
@@ -1371,10 +1391,10 @@ namespace FastTests.Server.Documents.Indexing.Auto
 
                 var index = await database.IndexStore.CreateIndex(new AutoMapIndexDefinition("Users", new[] { name1 }), Guid.NewGuid().ToString());
                 Assert.NotNull(index);
-                var indexSafeName = IndexDefinitionBase.GetIndexNameSafeForFileSystem(index.Name);
+                var indexSafeName = IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(index.Name);
 
                 var indexStoragePath = Path.Combine(database.Configuration.Indexing.StoragePath.FullPath,
-                    IndexDefinitionBase.GetIndexNameSafeForFileSystem(index.Name));
+                    IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(index.Name));
 
 
                 Server.ServerStore.DatabasesLandlord.UnloadDirectly(dbName);
@@ -1396,7 +1416,7 @@ namespace FastTests.Server.Documents.Indexing.Auto
 
                 Assert.IsType<FaultyInMemoryIndex>(index);
                 Assert.Equal(IndexState.Error, index.State);
-                Assert.Equal(indexSafeName, IndexDefinitionBase.GetIndexNameSafeForFileSystem(index.Name));
+                Assert.Equal(indexSafeName, IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(index.Name));
 
                 await database.IndexStore.DeleteIndex(index.Name, Guid.NewGuid().ToString());
 

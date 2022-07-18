@@ -6,6 +6,7 @@ import verifyDocumentsIDsCommand = require("commands/database/documents/verifyDo
 import getDocumentRevisionsCommand = require("commands/database/documents/getDocumentRevisionsCommand");
 import appUrl = require("common/appUrl");
 import endpoints = require("endpoints");
+import moment = require("moment");
 import generalUtils = require("common/generalUtils");
 import virtualColumn = require("widgets/virtualGrid/columns/virtualColumn");
 import textColumn = require("widgets/virtualGrid/columns/textColumn");
@@ -18,6 +19,7 @@ import downloader = require("common/downloader");
 import viewHelpers = require("common/helpers/view/viewHelpers");
 import editDocumentUploader = require("viewmodels/database/documents/editDocumentUploader");
 import columnPreviewPlugin = require("widgets/virtualGrid/columnPreviewPlugin");
+import timeSeriesEntryModel = require("models/database/timeSeries/timeSeriesEntryModel");
 
 type connectedDocsTabs = "attachments" | "counters" | "revisions" | "related" | "recent" | "timeSeries";
 type connectedItemType = connectedDocumentItem | attachmentItem | counterItem | timeSeriesItem;
@@ -26,6 +28,8 @@ interface connectedDocumentItem {
     id: string;
     href: string;
     deletedRevision: boolean;
+    conflictRevision: boolean;
+    resolvedRevision: boolean;
 }
 
 interface connectedRevisionDocumentItem extends connectedDocumentItem {
@@ -57,8 +61,9 @@ class connectedDocuments {
     attachmentsColumns: virtualColumn[];
     attachmentsInReadOnlyModeColumns: virtualColumn[];
     countersColumns: virtualColumn[];
-    revisionCountersColumns: virtualColumn[];
+    countersInReadOnlyModeColumns: virtualColumn[];
     timeSeriesColumns: virtualColumn[];
+    timeSeriesInReadOnlyModeColumns: virtualColumn[];
     
     private downloader = new downloader();
     currentDocumentIsStarred = ko.observable<boolean>(false);
@@ -135,7 +140,9 @@ class connectedDocuments {
 
         const revisionColumn = new hyperlinkColumn<connectedRevisionDocumentItem>(this.gridController() as virtualGridController<any>, x => x.id, x => x.href, "", "75%",
             {
-                extraClass: item => item.deletedRevision ? "deleted-revision" : ""
+                extraClass: item => item.deletedRevision ? "typed-revision deleted-revision" :
+                    (item.conflictRevision ? "typed-revision conflict-revision" :
+                    item.resolvedRevision ? "typed-revision resolved-revision" : "")
             });
         const revisionCompareColumn = new actionColumn<connectedRevisionDocumentItem>(this.gridController() as virtualGridController<any>, (x, idx, e) => this.compareRevision(x, idx, e), "Diff", () => `<i title="Compare document with this revision" class="icon-diff"></i>`, "25%",
             {
@@ -191,7 +198,7 @@ class connectedDocuments {
                 { title: () => 'Delete counter', hide: () => this.isReadOnlyAccess() }),
         ];
 
-        this.revisionCountersColumns = [
+        this.countersInReadOnlyModeColumns = [
             new textColumn<counterItem>(this.gridController() as virtualGridController<any>, x => x.counterName, "Counter name", "60%"),
             new textColumn<counterItem>(this.gridController() as virtualGridController<any>, x => generalUtils.formatAsCommaSeperatedString(x.totalCounterValue, 0), "Counter total value", "40%")
         ];
@@ -199,9 +206,9 @@ class connectedDocuments {
         const dateFormatter = (date: string) => moment.utc(date).local().format("YYYY-MM-DD");
         
         this.timeSeriesColumns = [
-            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => x.name, "Timeseries Name", "145px"),
-            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => generalUtils.siFormat(x.numberOfEntries), "Timeseries items count", "60px"),
-            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => dateFormatter(x.startDate) + " - " + dateFormatter(x.endDate), "Timeseries date range", "170px"),
+            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => x.name, "Time series name", "145px"),
+            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => x.numberOfEntries, "Time series items count", "60px"),
+            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => dateFormatter(x.startDate) + " - " + dateFormatter(x.endDate), "Time series date range", "170px"),
             new actionColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>,
                 x => this.goToTimeSeriesEdit(x),
                 "Details",
@@ -209,6 +216,12 @@ class connectedDocuments {
                 "50px",
                 { title: () => this.isClone() ? 'Go to time series in source document' : 'Go to time series details' })
         ]
+        
+        this.timeSeriesInReadOnlyModeColumns = [
+            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => x.name, "Time series name", "145px"),
+            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => x.numberOfEntries, "Time series items count", "60px"),
+            new textColumn<timeSeriesItem>(this.gridController() as virtualGridController<any>, x => dateFormatter(x.startDate) + " - " + dateFormatter(x.endDate), "Time series date range", "170px")
+        ];
     }
 
     compositionComplete() {
@@ -221,11 +234,7 @@ class connectedDocuments {
             }
             
             if (connectedDocuments.currentTab() === "counters") {
-                const doc = this.document();
-                if (doc && doc.__metadata && doc.__metadata.hasFlag("Revision")) {
-                    return this.revisionCountersColumns;
-                }
-                return this.countersColumns;
+                return this.inReadOnlyMode() ? this.countersInReadOnlyModeColumns : this.countersColumns;
             }
             
             if (connectedDocuments.currentTab() === "revisions") {
@@ -233,7 +242,7 @@ class connectedDocuments {
             }
 
             if (connectedDocuments.currentTab() === "timeSeries") {
-                return this.timeSeriesColumns;
+                return this.inReadOnlyMode() ? this.timeSeriesInReadOnlyModeColumns : this.timeSeriesColumns;
             }
             
             return this.docsColumns;
@@ -242,19 +251,23 @@ class connectedDocuments {
         this.gridResetSubscription = connectedDocuments.currentTab.subscribe(() => this.gridController().reset());
 
         this.columnPreview.install(".document-items-grid", ".document-items-tooltip",
-                                    (item: connectedItemType, 
-                                     column: virtualColumn, 
-                                     e: JQueryEventObject, 
-                                     onValue: (context: any, valueToCopy?: string) => void) => {
-                                         if (column instanceof textColumn) {
-                                             if (column.header === "Timeseries date range") {
-                                                 onValue((item as timeSeriesItem).startDate + " - " + (item as timeSeriesItem).endDate);
-                                             } else {
-                                                 const value = column.getCellValue(item);
-                                                 onValue(value);
-                                             }
-                                         }
-                                   });
+            (item: connectedItemType,
+             column: virtualColumn,
+             e: JQueryEventObject,
+             onValue: (context: any, valueToCopy?: string) => void) => {
+                const timeSeriesItem = (item as timeSeriesItem);
+                
+                if (column instanceof textColumn) {
+                    if (column.header === "Timeseries date range") {
+                        onValue(timeSeriesItem.startDate + " - " + timeSeriesItem.endDate);
+                    } else if (column.header === "Timeseries items count") {
+                        onValue(timeSeriesItem.numberOfEntries.toLocaleString());
+                    } else {
+                        const value = column.getCellValue(item);
+                        onValue(value);
+                    }
+                }
+            });
     }
 
     dispose() {
@@ -314,7 +327,7 @@ class connectedDocuments {
         const recentDocs = this.recentDocuments.getTopRecentDocuments(this.db(), doc.getId(), this.isClone());
         
         return $.Deferred<pagedResult<connectedDocumentItem>>().resolve({
-            items: recentDocs.map(x => ({ id: x.id, href: x.href, deletedRevision: false })),
+            items: recentDocs.map(x => ({ id: x.id, href: x.href, deletedRevision: false, conflictRevision: false, resolvedRevision: false })),
             totalResultCount: recentDocs.length,
         }).promise();
     }
@@ -358,7 +371,11 @@ class connectedDocuments {
         return {
             href: appUrl.forViewDocumentAtRevision(doc.getId(), changeVector, this.db()),
             id: doc.__metadata.lastModified(),
+            
             deletedRevision: doc.__metadata.hasFlag("DeleteRevision"),
+            conflictRevision: doc.__metadata.hasFlag("Conflicted"), 
+            resolvedRevision: doc.__metadata.hasFlag("Resolved"), 
+            
             revisionChangeVector: changeVector
         };
     }
@@ -488,7 +505,9 @@ class connectedDocuments {
         return {
             id: docId,
             href: appUrl.forEditDoc(docId, this.db()),
-            deletedRevision: false
+            deletedRevision: false,
+            conflictRevision: false,
+            resolvedRevision: false
         }
     }
 

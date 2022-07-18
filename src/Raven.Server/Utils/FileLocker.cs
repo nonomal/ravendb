@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using System.Threading;
 using Sparrow.Logging;
 
 namespace Raven.Server.Utils
@@ -20,7 +21,7 @@ namespace Raven.Server.Utils
             _writeLockFile = null;
         }
 
-        public void TryAcquireWriteLock(Logger logger)
+        public void TryAcquireWriteLock(Logger logger, int numberOfRetries = 3)
         {
             var dir = Path.GetDirectoryName(_lockFile);
             try
@@ -31,7 +32,9 @@ namespace Raven.Server.Utils
                 _writeLockFile = new FileStream(_lockFile, FileMode.Create,
                     FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.DeleteOnClose);
                 _writeLockFile.SetLength(1);
+#pragma warning disable CA1416 // Validate platform compatibility
                 _writeLockFile.Lock(0, 1);
+#pragma warning restore CA1416 // Validate platform compatibility
             }
             catch (PlatformNotSupportedException)
             {
@@ -40,6 +43,20 @@ namespace Raven.Server.Utils
             }
             catch (Exception e)
             {
+                if (e is IOException && numberOfRetries > 0 && _writeLockFile == null)
+                {
+                    try
+                    {
+                        Thread.Sleep(100);
+                        TryAcquireWriteLock(logger, numberOfRetries - 1);
+                        return;
+                    }
+                    catch
+                    {
+                        // ignore and throw below exception
+                    }
+                }
+
                 _writeLockFile?.Dispose();
                 _writeLockFile = null;
                 string additionalInfo = null;
@@ -88,7 +105,9 @@ namespace Raven.Server.Utils
             {
                 try
                 {
+#pragma warning disable CA1416 // Validate platform compatibility
                     _writeLockFile.Unlock(0, 1);
+#pragma warning restore CA1416 // Validate platform compatibility
                 }
                 catch (PlatformNotSupportedException)
                 {

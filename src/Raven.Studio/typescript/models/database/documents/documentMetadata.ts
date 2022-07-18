@@ -1,8 +1,9 @@
 /// <reference path="../../../../typings/tsd.d.ts" />
 
 import generalUtils = require("common/generalUtils");
+import moment = require("moment");
 
-type knownDocumentFlags = "HasRevisions" | "Revision" | "HasAttachments" | "DeleteRevision" | "HasCounters" | "Artificial" | "HasTimeSeries";
+type knownDocumentFlags = "HasRevisions" | "Revision" | "HasAttachments" | "DeleteRevision" | "HasCounters" | "Artificial" | "HasTimeSeries" | "Conflicted" | "Resolved";
 
 interface revisionCounter {
     name: string;
@@ -130,6 +131,7 @@ class documentMetadata {
                     property.toUpperCase() !== '@counters'.toUpperCase() &&
                     property.toUpperCase() !== '@counters-snapshot'.toUpperCase() &&
                     property.toUpperCase() !== '@timeseries'.toUpperCase() &&
+                    property.toUpperCase() !== '@timeseries-snapshot'.toUpperCase() &&
                     property.toUpperCase() !== 'toDto'.toUpperCase() &&
                     property.toUpperCase() !== '@change-vector'.toUpperCase()) {
                     this.nonStandardProps = this.nonStandardProps || [];
@@ -190,6 +192,7 @@ class documentMetadata {
         this.flags = "";
         this.counters([]);
         this.attachments([]);
+        this.timeSeries([]);
     }
 }
 

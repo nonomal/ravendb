@@ -83,7 +83,7 @@
             </div>
         </div>
         <div class="col-sm-12 col-lg-6 flex-vertical" data-bind="visible: testResultsVisible">
-            <div class="panel padding flex-vertical flex-grow fixed">
+            <div class="panel padding flex-vertical flex-grow">
                 <div class="flex-header">
                     <div class="flex-horizontal">
                         <div class="flex-grow"><h3>Test Results</h3></div>
@@ -99,7 +99,7 @@
                             <span class="caret"></span>
                         </button>
                         <div class="dropdown-menu colselect-dropdown slidein-style" role="menu" data-bind="dropdownPanel: true">
-                            <div data-bind="compose: $root.columnsSelector"></div>
+                            <div data-bind="compose: { model: $root.columnsSelector }"></div>
                         </div>
                     </div>
                 </div>
@@ -125,8 +125,8 @@
     <div class="panel-addon padding padding-sm">
         <div class="margin-bottom">
             <label title="Enter a query to test the sorter">Enter test RQL:</label>
-            <pre class="form-control margin-top"
-                 data-bind="aceEditor: { code: testRql, lang:'ace/mode/rql', completer: $root.queryCompleter.complete }, validationOptions: { errorsAsTitle: false }, validationElement: testRql" style="height: 160px;">
+            <pre class="form-control margin-top query-source"
+                 data-bind="aceEditor: { code: testRql, lang:'ace/mode/rql', completer: $root.languageService.complete }, validationOptions: { errorsAsTitle: false }, validationElement: testRql" style="height: 160px;">
                                 </pre>
             <div data-bind="validationOptions: { errorsAsTitle: false }, validationElement: testRql">
                 <div class="help-block" data-bind="validationMessage: testRql"></div>

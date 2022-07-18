@@ -378,7 +378,7 @@ namespace Raven.Server.Documents
 
             // Only register the event if we actually deleted any conflicts
             var tx = context.Transaction.InnerTransaction.LowLevelTransaction;
-            tx.AfterCommitWhenNewReadTransactionsPrevented += _ =>
+            tx.AfterCommitWhenNewTransactionsPrevented += _ =>
             {
                 Interlocked.Add(ref ConflictsCount, -listCount);
             };
@@ -415,7 +415,7 @@ namespace Raven.Server.Documents
                     return;
 
                 var tx = context.Transaction.InnerTransaction.LowLevelTransaction;
-                tx.AfterCommitWhenNewReadTransactionsPrevented += _ =>
+                tx.AfterCommitWhenNewTransactionsPrevented += _ =>
                 {
                     Interlocked.Decrement(ref ConflictsCount);
                 };
@@ -780,7 +780,11 @@ namespace Raven.Server.Documents
 
             if (HasHigherChangeVector(context, lowerId, expectedChangeVector))
             {
-                throw new ConcurrencyException($"Failed to resolve document conflict with change vector = {expectedChangeVector}, because we have a newer change vector.");
+                throw new ConcurrencyException($"Failed to resolve document conflict with change vector = {expectedChangeVector}, because we have a newer change vector.")
+                {
+                    Id = lowerId.ToString(),
+                    ExpectedChangeVector = expectedChangeVector
+                };
             }
         }
 

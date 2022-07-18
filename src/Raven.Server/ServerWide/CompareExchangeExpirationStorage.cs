@@ -14,7 +14,15 @@ namespace Raven.Server.ServerWide
 {
     public class CompareExchangeExpirationStorage
     {
-        public static string CompareExchangeByExpiration = "CompareExchangeByExpiration";
+        public static readonly Slice CompareExchangeByExpiration;
+
+        static CompareExchangeExpirationStorage()
+        {
+            using (StorageEnvironment.GetStaticContext(out var ctx))
+            {
+                Slice.From(ctx, nameof(CompareExchangeByExpiration), out CompareExchangeByExpiration);
+            }
+        }
 
         public static unsafe void Put(ClusterOperationContext context, Slice keySlice, long ticks)
         {
@@ -39,7 +47,7 @@ namespace Raven.Server.ServerWide
             }
         }
 
-        private static IEnumerable<(Slice keySlice, long expiredTicks, Slice ticksSlice)> GetExpiredValues(ClusterOperationContext context, long currentTicks)
+        internal static IEnumerable<(Slice keySlice, long expiredTicks, Slice ticksSlice)> GetExpiredValues(ClusterOperationContext context, long currentTicks)
         {
             var expirationTree = context.Transaction.InnerTransaction.ReadTree(CompareExchangeByExpiration);
             using (var it = expirationTree.Iterate(false))
@@ -72,40 +80,20 @@ namespace Raven.Server.ServerWide
             }
         }
 
-        public static bool HasExpiredMetadata(BlittableJsonReaderObject value, out long ticks, Slice keySlice, string storageKey = null)
+        public static bool TryGetExpires(BlittableJsonReaderObject value, out long ticks)
         {
             ticks = default;
-            if (value.TryGetMember(Constants.Documents.Metadata.Key, out var metadata) == false || metadata == null)
+            if (value.TryGetMember(Constants.Documents.Metadata.Key, out var metadata) == false || metadata is not BlittableJsonReaderObject metadataReader)
+                return false;
+        
+            if (metadataReader.TryGet(Constants.Documents.Metadata.Expires, out LazyStringValue expirationDate) == false)
                 return false;
 
-            if (metadata is BlittableJsonReaderObject bjro && bjro.TryGet(Constants.Documents.Metadata.Expires, out object obj))
-            {
-                if (obj is LazyStringValue expirationDate)
-                {
-                    if (DateTime.TryParseExact(expirationDate, DefaultFormat.DateTimeFormatsToRead, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind,
-                            out DateTime date) == false)
-                    {
-                        storageKey ??= keySlice.ToString();
+            if (DateTime.TryParseExact(expirationDate, DefaultFormat.DateTimeFormatsToRead, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var date) == false)
+                throw new FormatException($"{Constants.Documents.Metadata.Expires} should contain date but has {expirationDate}': {value}");
 
-                        var inner = new InvalidOperationException(
-                            $"The expiration date format for compare exchange '{CompareExchangeKey.SplitStorageKey(storageKey).Key}' is not valid: '{expirationDate}'. Use the following format: {DateTime.UtcNow:O}");
-                        throw new RachisApplyException("Could not apply command.", inner);
-                    }
-
-                    var expiry = date.ToUniversalTime();
-                    ticks = expiry.Ticks;
-                    return true;
-                }
-                else
-                {
-                    storageKey ??= keySlice.ToString();
-                    var inner = new InvalidOperationException(
-                        $"The type of {Constants.Documents.Metadata.Expires} metadata for compare exchange '{CompareExchangeKey.SplitStorageKey(storageKey).Key}' is not valid. Use the following type: {nameof(DateTime)}");
-                    throw new RachisApplyException("Could not apply command.", inner);
-                }
-            }
-
-            return false;
+            ticks = date.ToUniversalTime().Ticks;
+            return true;
         }
 
         public static unsafe bool DeleteExpiredCompareExchange(ClusterOperationContext context, Table items, long ticks, long take = long.MaxValue)
@@ -132,7 +120,7 @@ namespace Raven.Server.ServerWide
                 var storeValue = reader.Read((int)ClusterStateMachine.CompareExchangeTable.Value, out var size);
                 using var result = new BlittableJsonReaderObject(storeValue, size, context);
 
-                if (HasExpiredMetadata(result, out long currentTicks, keySlice, storageKey: null) == false)
+                if (TryGetExpires(result, out long currentTicks) == false)
                     continue;
 
                 if (currentTicks > expiredTicks)

@@ -1,26 +1,23 @@
 import appUrl = require("common/appUrl");
 import eventsCollector = require("common/eventsCollector");
-
 import viewModelBase = require("viewmodels/viewModelBase");
 import app = require("durandal/app");
-
 import getConflictsCommand = require("commands/database/replication/getConflictsCommand");
 import getConflictsForDocumentCommand = require("commands/database/replication/getConflictsForDocumentCommand");
 import getSuggestedConflictResolutionCommand = require("commands/database/replication/getSuggestedConflictResolutionCommand");
-
 import deleteDocuments = require("viewmodels/common/deleteDocuments");
-
 import aceEditorBindingHandler = require("common/bindingHelpers/aceEditorBindingHandler");
-
 import virtualGridController = require("widgets/virtualGrid/virtualGridController");
 import hyperlinkColumn = require("widgets/virtualGrid/columns/hyperlinkColumn");
 import textColumn = require("widgets/virtualGrid/columns/textColumn");
 import messagePublisher = require("common/messagePublisher");
-
 import document = require("models/database/documents/document");
 import saveDocumentCommand = require("commands/database/documents/saveDocumentCommand");
 import changeVectorUtils = require("common/changeVectorUtils");
 import generalUtils = require("common/generalUtils");
+import copyToClipboard = require("common/copyToClipboard");
+import moment = require("moment");
+import { highlight, languages } from "prismjs";
 
 class conflictItem {
     
@@ -37,7 +34,7 @@ class conflictItem {
         if (dto.Doc) {
             const json = JSON.stringify(dto.Doc, null, 4);
             this.originalValue(json);
-            this.formattedValue(Prism.highlight(json, (Prism.languages as any).javascript));
+            this.formattedValue(highlight(json, languages.javascript, "js"));
             this.deletedMarker(false);
             this.changeVector(changeVectorUtils.formatChangeVector(dto.ChangeVector, useLongChangeVectorFormat));
         } else {
@@ -59,6 +56,8 @@ class conflictItem {
 
 class conflicts extends viewModelBase {
 
+    view = require("views/database/conflicts/conflicts.html");
+
     hasDetailsLoaded = ko.observable<boolean>(false);
     detailsVisible = ko.observable<boolean>(false);
 
@@ -78,7 +77,7 @@ class conflicts extends viewModelBase {
     constructor() {
         super();
         
-        this.bindToCurrentInstance("useThis");
+        this.bindToCurrentInstance("useThis", "copyThis");
 
         aceEditorBindingHandler.install();
         this.initValidation();
@@ -254,6 +253,10 @@ class conflicts extends viewModelBase {
     useThis(itemToUse: conflictItem) {
         this.suggestedResolution(itemToUse.originalValue());
     }
+
+    copyThis(itemToCopy: conflictItem) {
+        copyToClipboard.copy(itemToCopy.originalValue(), "Document has been copied to clipboard");
+}
 }
 
 export = conflicts;

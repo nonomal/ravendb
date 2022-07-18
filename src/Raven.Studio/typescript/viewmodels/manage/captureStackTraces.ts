@@ -6,6 +6,8 @@ import clusterTopologyManager = require("common/shell/clusterTopologyManager");
 import copyToClipboard = require("common/copyToClipboard");
 import fileDownloader = require("common/fileDownloader");
 import fileImporter = require("common/fileImporter");
+import genUtils = require("common/generalUtils");
+import icomoonHelpers from "common/helpers/view/icomoonHelpers";
 
 type stackFrame = {
     short: string;
@@ -28,7 +30,7 @@ class stackInfo {
     }
 
     static isUserCode(line: string): boolean {
-        return line.startsWith("Raven") || line.startsWith("Voron") || line.startsWith("Sparrow");
+        return genUtils.isRavenDBCode(line);
     }
 
     constructor(public threadIds: number[], public stackTrace: string[]) {
@@ -70,6 +72,8 @@ class stackInfo {
 }
 
 class captureStackTraces extends viewModelBase {
+    
+    view = require("views/manage/captureStackTraces.html");
     
     spinners = {
         loading: ko.observable<boolean>(false)
@@ -395,7 +399,7 @@ class captureStackTraces extends viewModelBase {
         buttonGroup
             .append("text")
             .attr("class", "icon-style copy")
-            .html("&#xe943;")
+            .html(icomoonHelpers.getCodePointForCanvas("copy-to-clipboard"))
             .attr("text-anchor", "middle")
             .attr("x", -stackInfo.headerSize / 2)
             .attr("y", 0);

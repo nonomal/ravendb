@@ -14,23 +14,24 @@ using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using Raven.Client;
-using Raven.Client.Extensions;
 using Raven.Client.Http;
 using Raven.Client.Properties;
 using Raven.Client.Util;
 using Raven.Debug.StackTrace;
 using Raven.Server;
 using Raven.Server.Commercial;
+using Raven.Server.Commercial.LetsEncrypt;
 using Raven.Server.Config;
-using Raven.Server.Config.Categories;
 using Raven.Server.Config.Settings;
 using Raven.Server.Documents;
 using Raven.Server.Documents.Indexes.Static.NuGet;
 using Raven.Server.Documents.PeriodicBackup;
 using Raven.Server.Documents.PeriodicBackup.Restore;
+using Raven.Server.Rachis;
 using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
+using Raven.Server.Utils.Features;
 using Sparrow.Collections;
 using Sparrow.Logging;
 using Sparrow.Platform;
@@ -39,6 +40,7 @@ using Sparrow.Server.Platform;
 using Sparrow.Threading;
 using Sparrow.Utils;
 using Tests.Infrastructure.Utils;
+using Voron.Exceptions;
 using Voron.Impl;
 using Xunit;
 using Xunit.Abstractions;
@@ -94,8 +96,11 @@ namespace FastTests
         {
             IgnoreProcessorAffinityChanges(ignore: true);
             LicenseManager.AddLicenseStatusToLicenseLimitsException = true;
+            RachisStateMachine.EnableDebugLongCommit = true;
 
             NativeMemory.GetCurrentUnmanagedThreadId = () => (ulong)Pal.rvn_get_current_thread_id();
+            ZstdLib.CreateDictionaryException = message => new VoronErrorException(message);
+
             Lucene.Net.Util.UnmanagedStringArray.Segment.AllocateMemory = NativeMemory.AllocateMemory;
             Lucene.Net.Util.UnmanagedStringArray.Segment.FreeMemory = NativeMemory.Free;
 
@@ -106,6 +111,11 @@ namespace FastTests
             var packagesPath = new PathSetting(RavenTestHelper.NewDataPath("NuGetPackages", 0, forceCreateDir: true));
             GlobalPathsToDelete.Add(packagesPath.FullPath);
             MultiSourceNuGetFetcher.Instance.Initialize(packagesPath, "https://api.nuget.org/v3/index.json");
+
+            IOExtensions.AfterGc += (s, x) =>
+            {
+                Console.WriteLine($"Execution of GC due to IO failure on path '{x.Path}' took {x.Duration} (attempt: {x.Attempt})");
+            };
 
 #if DEBUG2
             TaskScheduler.UnobservedTaskException += (sender, args) =>
@@ -183,122 +193,6 @@ namespace FastTests
         {
             _customServerSettings = customSettings;
             _doNotReuseServer = true;
-        }
-
-        protected static TestCertificatesHolder _selfSignedCertificates;
-
-        protected TestCertificatesHolder GenerateAndSaveSelfSignedCertificate(bool createNew = false)
-        {
-            if (createNew)
-                return ReturnCertificatesHolder(Generate(Interlocked.Increment(ref _counter)));
-
-            var selfSignedCertificates = _selfSignedCertificates;
-            if (selfSignedCertificates != null)
-                return ReturnCertificatesHolder(selfSignedCertificates);
-
-            lock (typeof(TestBase))
-            {
-                selfSignedCertificates = _selfSignedCertificates;
-                if (selfSignedCertificates == null)
-                    _selfSignedCertificates = selfSignedCertificates = Generate();
-
-                return ReturnCertificatesHolder(selfSignedCertificates);
-            }
-
-            TestCertificatesHolder ReturnCertificatesHolder(TestCertificatesHolder certificates)
-            {
-                return new TestCertificatesHolder(certificates, GetTempFileName);
-            }
-
-            TestCertificatesHolder Generate(int gen = 0)
-            {
-                var log = new StringBuilder();
-                byte[] certBytes;
-                string serverCertificatePath = null;
-
-                serverCertificatePath = Path.Combine(Path.GetTempPath(), $"Server-{gen}-{RavenVersionAttribute.Instance.Build}-{DateTime.Today:yyyy-MM-dd}.pfx");
-
-                if (File.Exists(serverCertificatePath) == false)
-                {
-                    try
-                    {
-                        certBytes = CertificateUtils.CreateSelfSignedTestCertificate(Environment.MachineName, "RavenTestsServer", log);
-                    }
-                    catch (Exception e)
-                    {
-                        throw new CryptographicException($"Unable to generate the test certificate for the machine '{Environment.MachineName}'. Log: {log}", e);
-                    }
-
-                    if (certBytes.Length == 0)
-                        throw new CryptographicException($"Test certificate length is 0 bytes. Machine: '{Environment.MachineName}', Log: {log}");
-
-                    try
-                    {
-                        File.WriteAllBytes(serverCertificatePath, certBytes);
-                    }
-                    catch (Exception e)
-                    {
-                        throw new InvalidOperationException("Failed to write the test certificate to a temp file." +
-                                                            $"tempFileName = {serverCertificatePath}" +
-                                                            $"certBytes.Length = {certBytes.Length}" +
-                                                            $"MachineName = {Environment.MachineName}.", e);
-                    }
-                }
-                else
-                {
-                    certBytes = File.ReadAllBytes(serverCertificatePath);
-                }
-                X509Certificate2 serverCertificate;
-                try
-                {
-                    serverCertificate = new X509Certificate2(certBytes, (string)null, X509KeyStorageFlags.MachineKeySet);
-                }
-                catch (Exception e)
-                {
-                    throw new CryptographicException($"Unable to load the test certificate for the machine '{Environment.MachineName}'. Log: {log}", e);
-                }
-
-                SecretProtection.ValidatePrivateKey(serverCertificatePath, null, certBytes, out var pk);
-                SecretProtection.ValidateKeyUsages(serverCertificatePath, serverCertificate, validateKeyUsages: true);
-
-                var clientCertificate1Path = GenerateClientCertificate(1, serverCertificate, pk);
-                var clientCertificate2Path = GenerateClientCertificate(2, serverCertificate, pk);
-                var clientCertificate3Path = GenerateClientCertificate(3, serverCertificate, pk);
-
-                return new TestCertificatesHolder(serverCertificatePath, clientCertificate1Path, clientCertificate2Path, clientCertificate3Path);
-            }
-
-            string GenerateClientCertificate(int index, X509Certificate2 serverCertificate, Org.BouncyCastle.Pkcs.AsymmetricKeyEntry pk)
-            {
-                string name = $"{Environment.MachineName}_CC_{RavenVersionAttribute.Instance.Build}_{index}_{DateTime.Today:yyyy-MM-dd}";
-                string clientCertificatePath = Path.Combine(Path.GetTempPath(), name + ".pfx");
-
-                if (File.Exists(clientCertificatePath) == false)
-                {
-                    CertificateUtils.CreateSelfSignedClientCertificate(
-                        name,
-                        new RavenServer.CertificateHolder
-                        {
-                            Certificate = serverCertificate,
-                            PrivateKey = pk
-                        },
-                        out var certBytes, DateTime.UtcNow.Date.AddYears(5));
-
-                    try
-                    {
-                        File.WriteAllBytes(clientCertificatePath, certBytes);
-                    }
-                    catch (Exception e)
-                    {
-                        throw new InvalidOperationException("Failed to write the test certificate to a temp file." +
-                                                            $"tempFileName = {clientCertificatePath}" +
-                                                            $"certBytes.Length = {certBytes.Length}" +
-                                                            $"MachineName = {Environment.MachineName}.", e);
-                    }
-                }
-
-                return clientCertificatePath;
-            }
         }
 
         protected string GetTempFileName()

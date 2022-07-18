@@ -70,7 +70,7 @@ namespace Raven.Server.Monitoring.Snmp
                 if (activate)
                 {
                     if (snmpEngine.Active == false)
-                        snmpEngine.Start();
+                        StartEngine(snmpEngine, _server);
                 }
                 else
                 {
@@ -107,7 +107,7 @@ namespace Raven.Server.Monitoring.Snmp
                     if (_snmpEngine.Active)
                         throw new InvalidOperationException("Cannot start SNMP Engine because it is already activated. Should not happen!");
 
-                    _snmpEngine.Start();
+                    StartEngine(_snmpEngine, _server);
                 }
 
                 _server.ServerStore.DatabasesLandlord.OnDatabaseLoaded += AddDatabaseIfNecessary;
@@ -421,11 +421,13 @@ namespace Raven.Server.Monitoring.Snmp
             store.Add(new DatabaseOldestBackup(server.ServerStore));
             store.Add(new DatabaseDisabledCount(server.ServerStore));
             store.Add(new DatabaseEncryptedCount(server.ServerStore));
+            store.Add(new DatabaseFaultedCount(server.ServerStore));
             store.Add(new DatabaseNodeCount(server.ServerStore));
 
             store.Add(new TotalDatabaseNumberOfIndexes(server.ServerStore));
             store.Add(new TotalDatabaseCountOfStaleIndexes(server.ServerStore));
             store.Add(new TotalDatabaseNumberOfErrorIndexes(server.ServerStore));
+            store.Add(new TotalDatabaseNumberOfFaultyIndexes(server.ServerStore));
 
             store.Add(new TotalDatabaseMapIndexIndexedPerSecond(server.ServerStore));
             store.Add(new TotalDatabaseMapReduceIndexMappedPerSecond(server.ServerStore));
@@ -451,7 +453,12 @@ namespace Raven.Server.Monitoring.Snmp
             store.Add(new ServerStorageTotalSize(server.ServerStore));
             store.Add(new ServerStorageDiskRemainingSpace(server.ServerStore));
             store.Add(new ServerStorageDiskRemainingSpacePercentage(server.ServerStore));
-
+            store.Add(new ServerStorageDiskIosReadOperations(server.ServerStore));
+            store.Add(new ServerStorageDiskIosWriteOperations(server.ServerStore));
+            store.Add(new ServerStorageDiskReadThroughput(server.ServerStore));
+            store.Add(new ServerStorageDiskWriteThroughput(server.ServerStore));
+            store.Add(new ServerStorageDiskQueueLength(server.ServerStore));
+            
             store.Add(new ServerCertificateExpiration(server.ServerStore));
             store.Add(new ServerCertificateExpirationLeft(server.ServerStore));
             store.Add(new WellKnownAdminCertificates(server.ServerStore));
@@ -466,6 +473,8 @@ namespace Raven.Server.Monitoring.Snmp
             store.Add(new ThreadPoolAvailableCompletionPortThreads());
 
             store.Add(new TcpActiveConnections());
+
+            store.Add(new FeatureAnyExperimental(server.ServerStore));
 
             AddGc(GCKind.Any);
             AddGc(GCKind.Background);
@@ -574,6 +583,18 @@ namespace Raven.Server.Monitoring.Snmp
                 return;
 
             _loadedDatabases[databaseName] = new SnmpDatabase(_server.ServerStore.DatabasesLandlord, _objectStore, databaseName, (int)databaseIndex);
+        }
+
+        private static void StartEngine(SnmpEngine engine, RavenServer server)
+        {
+            try
+            {
+                engine.Start();
+            }
+            catch (Exception e)
+            {
+                throw new InvalidOperationException($"Could not start SNMP Engine at port {server.Configuration.Monitoring.Snmp.Port}", e);
+            }
         }
 
         internal static Dictionary<string, long> GetMapping(ServerStore serverStore, TransactionOperationContext context)

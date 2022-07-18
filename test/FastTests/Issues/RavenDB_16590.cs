@@ -50,6 +50,8 @@ namespace FastTests.Issues
                 "Indexing.Analyzers.NGram.MaxGram",
                 "Indexing.Analyzers.NGram.MinGram",
                 "Indexing.Analyzers.Search.Default",
+                "Indexing.QueryClauseCache.Disabled",
+                "Indexing.QueryClauseCache.RepeatedQueriesTimeFrameInSec",
                 "Indexing.Encrypted.TransactionSizeLimitInMb",
                 "Indexing.IndexEmptyEntries",
                 "Indexing.IndexMissingFieldsAsNull",
@@ -68,6 +70,7 @@ namespace FastTests.Issues
                 "Indexing.NumberOfConcurrentStoppedBatchesIfRunningLowOnMemory",
                 "Indexing.NumberOfLargeSegmentsToMergeInSingleBatch",
                 "Indexing.ScratchSpaceLimitInMb",
+                "Indexing.TimeSinceLastQueryAfterWhichDeepCleanupCanBeExecutedInMin",
                 "Indexing.Throttling.TimeIntervalInMs",
                 "Indexing.TransactionSizeLimitInMb"
             };

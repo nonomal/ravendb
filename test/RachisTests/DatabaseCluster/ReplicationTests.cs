@@ -84,8 +84,8 @@ namespace RachisTests.DatabaseCluster
                 var result = await CreateRaftClusterWithSsl(clusterSize, false);
                 leader = result.Leader;
 
-                adminCertificate = RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
-                clientCertificate = RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>
+                adminCertificate = Certificates.RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
+                clientCertificate = Certificates.RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>
                 {
                     [databaseName] = DatabaseAccess.Admin
                 }, server: leader);
@@ -111,6 +111,7 @@ namespace RachisTests.DatabaseCluster
                 var doc = new DatabaseRecord(databaseName);
                 databaseResult = await store.Maintenance.Server.SendAsync(new CreateDatabaseOperation(doc, clusterSize));
             }
+            
             Assert.Equal(clusterSize, databaseResult.Topology.AllNodes.Count());
             foreach (var server in Servers)
             {
@@ -202,7 +203,7 @@ namespace RachisTests.DatabaseCluster
                 });
 
                 var update = await source.Maintenance.SendAsync(op);
-                await WaitForRaftIndexToBeAppliedInCluster(update.RaftCommandIndex);
+                await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(update.RaftCommandIndex);
 
                 await WaitAndAssertForValueAsync(() =>
                 {
@@ -240,7 +241,7 @@ namespace RachisTests.DatabaseCluster
                 var result = await CreateRaftClusterWithSsl(clusterSize);
                 leader = result.Leader;
 
-                adminCertificate = RegisterClientCertificate(result.Certificates, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
+                adminCertificate = Certificates.RegisterClientCertificate(result.Certificates, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
             }
             else
             {
@@ -481,7 +482,7 @@ namespace RachisTests.DatabaseCluster
                     MentorNode = leader.ServerStore.NodeTag
                 };
                 var updateRes = await AddWatcherToReplicationTopology((DocumentStore)store, watcher);
-                await WaitForRaftIndexToBeAppliedInCluster(updateRes.RaftCommandIndex, TimeSpan.FromSeconds(10));
+                await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(updateRes.RaftCommandIndex, TimeSpan.FromSeconds(10));
                 Assert.True(WaitForDocument(new[] { leader.WebUrl }, watcher.Database));
             }
 
@@ -529,7 +530,7 @@ namespace RachisTests.DatabaseCluster
                 watcher.Name = "MyExternalReplication2";
                 watcher.Database = external2;
                 var updateRes = await AddWatcherToReplicationTopology((DocumentStore)store, watcher);
-                await WaitForRaftIndexToBeAppliedInCluster(updateRes.RaftCommandIndex, TimeSpan.FromSeconds(10));
+                await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(updateRes.RaftCommandIndex, TimeSpan.FromSeconds(10));
                 Assert.True(WaitForDocument(new[] { leader.WebUrl }, watcher.Database));
             }
 
@@ -586,7 +587,7 @@ namespace RachisTests.DatabaseCluster
                 var result = await CreateRaftClusterWithSsl(clusterSize);
                 leader = result.Leader;
 
-                adminCertificate = RegisterClientCertificate(result.Certificates, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
+                adminCertificate = Certificates.RegisterClientCertificate(result.Certificates, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
             }
             else
             {
@@ -659,8 +660,8 @@ namespace RachisTests.DatabaseCluster
                 var result = await CreateRaftClusterWithSsl(clusterSize, true, 0);
                 leader = result.Leader;
 
-                adminCertificate = RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
-                clientCertificate = RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>
+                adminCertificate = Certificates.RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
+                clientCertificate = Certificates.RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>
                 {
                     [databaseName] = DatabaseAccess.Admin
                 }, server: leader);
@@ -791,10 +792,10 @@ namespace RachisTests.DatabaseCluster
         [Fact]
         public async Task ReplicateToWatcherWithAuth()
         {
-            var certificates = SetupServerAuthentication();
+            var certificates = Certificates.SetupServerAuthentication();
             var dbName = GetDatabaseName();
-            var adminCert = RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
-            var opCert = RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.Operator);
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+            var opCert = Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.Operator);
 
             using (var store1 = GetDocumentStore(new Options
             {
@@ -827,11 +828,11 @@ namespace RachisTests.DatabaseCluster
         [Fact]
         public async Task ReplicateToWatcherWithInvalidAuth()
         {
-            var certificates = SetupServerAuthentication();
+            var certificates = Certificates.SetupServerAuthentication();
             var dbName = GetDatabaseName();
-            var adminCert = RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
-            var userCert1 = RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.Operator);
-            var userCert2 = RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate3.Value, new Dictionary<string, DatabaseAccess>
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+            var userCert1 = Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.Operator);
+            var userCert2 = Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate3.Value, new Dictionary<string, DatabaseAccess>
             {
                 [dbName + "otherstuff"] = DatabaseAccess.Admin
             });
@@ -1086,7 +1087,7 @@ namespace RachisTests.DatabaseCluster
             using (var store1 = GetDocumentStore())
             using (var store2 = GetDocumentStore())
             {
-                var database = await GetDocumentDatabaseInstanceFor(store1);
+                var database = await Databases.GetDocumentDatabaseInstanceFor(store1);
                 var handlers = new HashSet<OutgoingReplicationHandler>();
 
                 database.ReplicationLoader.OutgoingReplicationAdded += handler =>
@@ -1131,7 +1132,7 @@ namespace RachisTests.DatabaseCluster
             using (var src = GetDocumentStore())
             using (var dst = GetDocumentStore())
             {
-                var database = await GetDocumentDatabaseInstanceFor(src);
+                var database = await Databases.GetDocumentDatabaseInstanceFor(src);
 
                 using (var session = src.OpenSession())
                 {

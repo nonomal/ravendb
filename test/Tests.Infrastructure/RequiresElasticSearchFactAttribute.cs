@@ -1,13 +1,24 @@
-﻿using Tests.Infrastructure.ConnectionString;
+﻿using System;
+using Tests.Infrastructure.ConnectionString;
+using xRetry;
 using Xunit;
 
 namespace Tests.Infrastructure
 {
-    public class RequiresElasticSearchFactAttribute : FactAttribute
+    public class RequiresElasticSearchFactAttribute : RetryFactAttribute
     {
-        public RequiresElasticSearchFactAttribute()
+        private static readonly bool _canConnect;
+
+        static RequiresElasticSearchFactAttribute()
         {
-            if (ElasticSearchTestNodes.Instance.CanConnect() == false)
+            _canConnect = ElasticSearchTestNodes.Instance.CanConnect();
+        }
+
+        public RequiresElasticSearchFactAttribute(int maxRetries = 3,
+            int delayBetweenRetriesMs = 1000,
+            params Type[] skipOnExceptions) : base(maxRetries, delayBetweenRetriesMs, skipOnExceptions)
+        {
+            if (_canConnect == false)
                 Skip = "Test requires ElasticSearch instance";
         }
     }

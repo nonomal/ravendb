@@ -1,9 +1,11 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using Raven.Client.Documents.Indexes;
+using Raven.Client.Documents.Operations.Backups;
 using Raven.Client.Documents.Operations.Configuration;
 using Raven.Client.Documents.Operations.Replication;
 using Raven.Client.Extensions;
@@ -14,6 +16,7 @@ using Raven.Client.ServerWide.Operations;
 using Raven.Client.Util;
 using Raven.Server.Config;
 using Raven.Server.Documents;
+using Raven.Server.Documents.PeriodicBackup;
 using Raven.Server.Extensions;
 using Raven.Server.NotificationCenter.Notifications;
 using Raven.Server.Routing;
@@ -73,7 +76,7 @@ namespace Raven.Server.Web.System
                             return;
                         }
 
-                        WriteDatabaseInfo(databaseName, dbDoc.Item2, context, w);
+                        WriteDatabaseInfo(databaseName, dbDoc.Value, context, w);
                     });
                     writer.WriteEndObject();
                 }
@@ -188,13 +191,22 @@ namespace Raven.Server.Web.System
                             name,
                             "Too many clients creations",
                             "There has been a lot of topology updates (more than 20) for the same client id in less than a minute. " +
-                            $"Last one from ({HttpContext.Connection.RemoteIpAddress} as " +
-                            $"{HttpContext.Connection.ClientCertificate?.FriendlyName ?? HttpContext.Connection.ClientCertificate?.Thumbprint ?? "<unsecured>"})" +
+                            $"Last one from ({HttpContext.Connection.RemoteIpAddress} as ({GetCertificateInfo()}) " +
                             "This is usually an indication that you are creating a large number of DocumentStore instance. " +
                             "Are you creating a Document Store per request, instead of using DocumentStore as a singleton? ",
                             AlertType.HighClientCreationRate,
                             NotificationSeverity.Warning
                         ));
+
+                    string GetCertificateInfo()
+                    {
+                        if (HttpContext.Connection.ClientCertificate == null)
+                            return "<unsecured>";
+
+                        return string.IsNullOrEmpty(HttpContext.Connection.ClientCertificate.FriendlyName) == false
+                            ? HttpContext.Connection.ClientCertificate.FriendlyName
+                            : HttpContext.Connection.ClientCertificate.Thumbprint;
+                    }
                 }
             }
         }
@@ -401,8 +413,19 @@ namespace Raven.Server.Web.System
                 if (online == false)
                 {
                     // if state of database is found in the cache we can continue
-                    if (ServerStore.DatabaseInfoCache.TryGet(databaseName, databaseInfoJson =>
-                    {
+                    if (ServerStore.DatabaseInfoCache.TryGet(databaseName, databaseInfoJson => { 
+                            
+                        var periodicBackups = new List<PeriodicBackup>();
+
+                        foreach (var periodicBackupConfiguration in dbRecord.PeriodicBackups)
+                        {
+                            periodicBackups.Add(new PeriodicBackup
+                            {
+                                Configuration = periodicBackupConfiguration,
+                                BackupStatus = BackupUtils.GetBackupStatusFromCluster(ServerStore, context, databaseName, periodicBackupConfiguration.TaskId)
+                            });
+                        }
+
                         databaseInfoJson.Modifications = new DynamicJsonValue(databaseInfoJson)
                         {
                             [nameof(DatabaseInfo.Disabled)] = disabled,
@@ -410,7 +433,15 @@ namespace Raven.Server.Web.System
                             [nameof(DatabaseInfo.IndexingStatus)] = indexingStatus,
                             [nameof(DatabaseInfo.NodesTopology)] = nodesTopology.ToJson(),
                             [nameof(DatabaseInfo.DeletionInProgress)] = DynamicJsonValue.Convert(dbRecord.DeletionInProgress),
-                            [nameof(DatabaseInfo.Environment)] = studioEnvironment
+                            [nameof(DatabaseInfo.Environment)] = studioEnvironment,
+                            [nameof(DatabaseInfo.BackupInfo)] = BackupUtils.GetBackupInfo(
+                                new BackupUtils.BackupInfoParameters()
+                                {
+                                    ServerStore = ServerStore,
+                                    PeriodicBackups = periodicBackups,
+                                    DatabaseName = databaseName,
+                                    Context = context
+                                })
                         };
 
                         context.Write(writer, databaseInfoJson);
@@ -532,7 +563,8 @@ namespace Raven.Server.Web.System
         private static BackupInfo GetBackupInfo(DocumentDatabase db, TransactionOperationContext context)
         {
             var periodicBackupRunner = db?.PeriodicBackupRunner;
-            return periodicBackupRunner?.GetBackupInfo(context);
+            var results = periodicBackupRunner?.GetBackupInfo(context);
+            return results;
         }
 
         private static TimeSpan GetUptime(DocumentDatabase db)

@@ -54,10 +54,9 @@ namespace SlowTests.Issues
 
                 index.Execute(store);
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var errors = store.Maintenance.Send(new GetIndexErrorsOperation());
-                Assert.Equal(0, errors[0].Errors.Length);
+                Assert.Null(Indexes.WaitForIndexingErrors(store, errorsShouldExists: false));
             }
         }
 

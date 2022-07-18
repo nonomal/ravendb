@@ -4,11 +4,14 @@ import nodeInfo = require("models/wizard/nodeInfo");
 import serverSetup = require("models/wizard/serverSetup");
 import popoverUtils = require("common/popoverUtils");
 import ipEntry = require("models/wizard/ipEntry");
-import databaseStudioConfigurationModel = require("models/database/settings/databaseStudioConfigurationModel");
+import moment = require("moment");
+import studioConfigurationDatabaseModel = require("models/database/settings/studioConfigurationDatabaseModel");
 
 class nodes extends setupStep {
 
-    static environments = databaseStudioConfigurationModel.environments;
+    view = require("views/wizard/nodes.html");
+
+    static environments = studioConfigurationDatabaseModel.environments;
     
     currentStep: number;
     

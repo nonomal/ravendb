@@ -38,11 +38,18 @@ export abstract class settingsEntry {
     protected constructor(data: Raven.Server.Config.ConfigurationEntryDatabaseValue) {
         this.data = data;
 
-        this.keyName(this.data.Metadata.Keys[this.data.Metadata.Keys.length - 1]);
-
-        this.serverOrDefaultValue = ko.pureComputed(() => _.isEmpty(this.data.ServerValues) ? this.data.Metadata.DefaultValue : this.data.ServerValues[this.keyName()].Value);
         this.hasServerValue = ko.pureComputed(() => !_.isEmpty(this.data.ServerValues));
+
+        this.keyName(this.data.Metadata.Keys[0]);
         
+        if (this.data.Metadata.Keys.length > 1 && this.hasServerValue()) {
+            // a single metadata key is expected from configuration, but case must be handled, see RavenDB-17777
+            const keyName = Object.keys(this.data.ServerValues)[0];
+            this.keyName(keyName);
+        }
+
+        this.serverOrDefaultValue = ko.pureComputed(() => this.hasServerValue() ? this.data.ServerValues[this.keyName()].Value : this.data.Metadata.DefaultValue);
+
         this.descriptionHtml = ko.pureComputed(() => {
             const rawDescription = data.Metadata.Description;
             return rawDescription ?
@@ -51,7 +58,7 @@ export abstract class settingsEntry {
         });
         
         this.entryClassForSummaryMode = ko.pureComputed(() => {
-            return this.hasPendingContent() || 
+            return this.hasPendingContent() ||
                    this.effectiveValueOrigin() === "Database" ? "highlight-key" : "";
         });
     }
@@ -81,6 +88,10 @@ export class serverWideOnlyEntry extends settingsEntry {
         const serverValuesHasContent = !_.isEmpty(this.data.ServerValues);
         if (serverValuesHasContent) {
             const keyContent = this.data.ServerValues[this.keyName()];
+            if (!keyContent) {
+                // we don't expect to get here..
+                console.warn(`Key with name: ${this.keyName()} was not found in the Server settings. Server Values are: ${Object.keys(this.data.ServerValues)}`);
+            }
             this.hasAccess(keyContent.HasAccess);
         }
     }
@@ -300,7 +311,7 @@ export abstract class numberEntry extends databaseEntry<number | null> {
 
         const numberValue = this.customizedDatabaseValue();
         
-        if (numberValue >= 0) {
+        if (numberValue) {
             return numberValue >= this.minValue() ? numberValue.toString() : null;
         } else {
             return null;
@@ -393,14 +404,13 @@ export class sizeEntry extends numberEntry {
 
 export class timeEntry extends numberEntry {
     timeUnit = ko.observable<string>();
-    specialTimeEntry = "Indexing.MapTimeoutInSec"; // Not nullable and default value is -1
 
     initCustomizedValue(value: string) {
         const timeValue = value ? parseInt(value) : null;
         this.customizedDatabaseValue(timeValue);
 
         this.timeUnit(this.data.Metadata.TimeUnit);
-        this.minValue(this.keyName() === this.specialTimeEntry ? -1 : this.data.Metadata.MinValue || 0);
+        this.minValue(this.data.Metadata.MinValue || -1);
     }
 
     getTemplateType(): settingsTemplateType {
@@ -412,7 +422,7 @@ export class timeEntry extends numberEntry {
 
         this.customizedDatabaseValue.extend({
             digit: {
-                onlyIf: () => this.keyName() !== this.specialTimeEntry || this.customizedDatabaseValue() !== -1
+                onlyIf: () => this.customizedDatabaseValue() !== -1
             }
         });
     }

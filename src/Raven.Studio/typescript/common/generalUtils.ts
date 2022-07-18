@@ -1,6 +1,5 @@
 ﻿/// <reference path="../../typings/tsd.d.ts" />
 import pluralizeHelpers = require("common/helpers/text/pluralizeHelpers");
-import timeHelpers = require("common/timeHelpers");
 import moment = require("moment");
 import d3 = require("d3");
 
@@ -642,10 +641,14 @@ class genUtils {
         });
         return uuid;
     }
-    
+
+    static isRavenDBCode(line: string): boolean {
+        return line.startsWith("Raven") || line.startsWith("Voron") || line.startsWith("Sparrow");
+    }
+
     static inMemoryRender(templateName: string, data: any) {
         const div = $("<div>");
-        
+
         try {
             ko.applyBindingsToNode(div[0], { template: { name: templateName, data } });
         } catch (e) {

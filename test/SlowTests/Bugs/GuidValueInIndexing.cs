@@ -29,10 +29,10 @@ namespace SlowTests.Bugs
                 };
                 store.Maintenance.Send(new PutIndexesOperation(new[] { indexDef }));
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var stats = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { "Test" }));
-                Assert.Empty(stats[0].Errors);
+                var stats = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                Assert.Null(stats);
 
             }
         }

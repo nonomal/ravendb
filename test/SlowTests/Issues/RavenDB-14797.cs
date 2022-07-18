@@ -4,6 +4,7 @@ using FastTests;
 using Raven.Client;
 using Raven.Client.Documents;
 using Raven.Client.Documents.Indexes;
+using Raven.Client.Documents.Operations.Indexes;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -38,7 +39,12 @@ namespace SlowTests.Issues
 
                     session.SaveChanges();
                 }
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
+                // we need to assert the indexes one by one, because each next index depends on previous 
+                Assert.False(WaitForValue(() => store.Maintenance.Send(new GetIndexStatisticsOperation("MapReduceWithOutputToCollection")).IsStale, expectedVal: false, interval: 333), "1. MapReduceWithOutputToCollection");
+                Assert.False(WaitForValue(() => store.Maintenance.Send(new GetIndexStatisticsOperation("JavaIndex")).IsStale, expectedVal: false, interval: 333), "1. JavaIndex");
+                Assert.False(WaitForValue(() => store.Maintenance.Send(new GetIndexStatisticsOperation("JavaWithAdditionalSourcesIndex")).IsStale, expectedVal: false, interval: 333), "1. JavaWithAdditionalSourcesIndex");
+
                 using (var session = store.OpenSession())
                 {
                     var q1 = session.Query<ThirdOutput>(collectionName: "ThirdOutput");
@@ -49,8 +55,13 @@ namespace SlowTests.Issues
                     var entity = session.Load<Data>(entityId);
                     entity.Name = "2";
                     session.SaveChanges();
-                    WaitForIndexing(store);
                 }
+
+                Indexes.WaitForIndexing(store);
+                Assert.False(WaitForValue(() => store.Maintenance.Send(new GetIndexStatisticsOperation("MapReduceWithOutputToCollection")).IsStale, expectedVal: false, interval: 333), "2. MapReduceWithOutputToCollection");
+                Assert.False(WaitForValue(() => store.Maintenance.Send(new GetIndexStatisticsOperation("JavaIndex")).IsStale, expectedVal: false, interval: 333), "2. JavaIndex");
+                Assert.False(WaitForValue(() => store.Maintenance.Send(new GetIndexStatisticsOperation("JavaWithAdditionalSourcesIndex")).IsStale, expectedVal: false, interval: 333), "2. JavaWithAdditionalSourcesIndex");
+
                 using (var session = store.OpenSession())
                 {
                     var q = session.Query<ThirdOutput>(collectionName: "ThirdOutput");
@@ -77,7 +88,7 @@ namespace SlowTests.Issues
                     }, id);
                     session.SaveChanges();
                 }
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
                 using (var session = store.OpenSession())
                 {
                     var entities = session.Query<Row, Index_Rows>().ProjectInto<Row>().ToList();

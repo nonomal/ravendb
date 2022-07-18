@@ -13,6 +13,8 @@ using Raven.Client.Documents.Operations.ConnectionStrings;
 using Raven.Client.Documents.Operations.Counters;
 using Raven.Client.Documents.Operations.ETL;
 using Raven.Client.Documents.Operations.Expiration;
+using Raven.Client.Documents.Operations.Integrations;
+using Raven.Client.Documents.Operations.Integrations.PostgreSQL;
 using Raven.Client.Documents.Operations.OngoingTasks;
 using Raven.Client.Documents.Operations.Refresh;
 using Raven.Client.Documents.Operations.Replication;
@@ -141,6 +143,8 @@ namespace Raven.Client.Json.Serialization
         public static readonly Func<BlittableJsonReaderObject, IndexErrors> IndexErrors = GenerateJsonDeserializationRoutine<IndexErrors>();
 
         public static readonly Func<BlittableJsonReaderObject, PatchResult> PatchResult = GenerateJsonDeserializationRoutine<PatchResult>();
+        
+        public static readonly Func<BlittableJsonReaderObject, JsonPatchResult> JsonPatchResult = GenerateJsonDeserializationRoutine<JsonPatchResult>();
 
         public static readonly Func<BlittableJsonReaderObject, GetCertificatesResponse> GetCertificatesResponse = GenerateJsonDeserializationRoutine<GetCertificatesResponse>();
         
@@ -248,5 +252,7 @@ namespace Raven.Client.Json.Serialization
         internal static readonly Func<BlittableJsonReaderObject, GetRevisionsCountOperation.DocumentRevisionsCount> DocumentRevisionsCount = GenerateJsonDeserializationRoutine<GetRevisionsCountOperation.DocumentRevisionsCount>();
 
         internal static readonly Func<BlittableJsonReaderObject, DatabaseSettings> DatabaseSettings = GenerateJsonDeserializationRoutine<DatabaseSettings>();
+
+        internal static readonly Func<BlittableJsonReaderObject, ConfigurePostgreSqlOperationResult> ConfigurePostgreSqlOperationResult = GenerateJsonDeserializationRoutine<ConfigurePostgreSqlOperationResult>();
     }
 }

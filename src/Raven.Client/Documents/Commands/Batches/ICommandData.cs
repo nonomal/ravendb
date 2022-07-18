@@ -35,6 +35,7 @@ namespace Raven.Client.Documents.Commands.Batches
         ForceRevisionCreation, 
         Counters,
         TimeSeries,
+        TimeSeriesWithIncrements,
         TimeSeriesBulkInsert,
         TimeSeriesCopy,
 
@@ -44,6 +45,8 @@ namespace Raven.Client.Documents.Commands.Batches
         // directly, be sure to also update DeferInternal
         // to recognize that these are allows, like with AttachmentPUT and
         // AttachmentDELETE
+
+        JsonPatch,
         ClientAnyCommand,
         ClientModifyDocumentCommand
     }

@@ -139,15 +139,15 @@ namespace SlowTests.Client.Subscriptions
                     Query = newQuery
                 }, Guid.NewGuid().ToString(), subscriptionState.SubscriptionId);
 
-                var db = await GetDocumentDatabaseInstanceFor(store, store.Database);
+                var db = await Databases.GetDocumentDatabaseInstanceFor(store, store.Database);
                 using (db.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
                 using (ctx.OpenReadTransaction())
                 {
                     var query = WaitForValue(() =>
                     {
-                        var connectionState = db.SubscriptionStorage.GetSubscriptionConnection(ctx, subscriptionState.SubscriptionName);
+                        var connectionState = db.SubscriptionStorage.GetSubscriptionConnectionsState(ctx, subscriptionState.SubscriptionName);
 
-                        return connectionState?.Connection?.SubscriptionState.Query;
+                        return connectionState?.GetConnections().First()?.SubscriptionState.Query;
                     }, newQuery);
 
                     Assert.Equal(newQuery, query);

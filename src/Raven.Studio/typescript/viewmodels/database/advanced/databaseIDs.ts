@@ -8,6 +8,8 @@ import changeVectorUtils = require("common/changeVectorUtils");
 
 class databaseIDs extends viewModelBase {
 
+    view = require("views/database/advanced/databaseIDs.html");
+
     isForbidden = ko.observable<boolean>(false);
     
     databaseID = ko.observable<string>();
@@ -81,7 +83,10 @@ class databaseIDs extends viewModelBase {
         return new getDatabaseDetailedStatsCommand(this.activeDatabase())
             .execute()
             .done((stats: Raven.Client.Documents.Operations.DetailedDatabaseStatistics) => {
-                this.databaseChangeVector(stats.DatabaseChangeVector.split(","));
+                if (stats.DatabaseChangeVector) {
+                    this.databaseChangeVector(stats.DatabaseChangeVector.split(","));
+                }
+                
                 this.databaseID(stats.DatabaseId);
             });
     }

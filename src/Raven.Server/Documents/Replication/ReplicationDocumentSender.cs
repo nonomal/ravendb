@@ -10,13 +10,18 @@ using Raven.Client.Documents.Attachments;
 using Raven.Client.Documents.Operations.Replication;
 using Raven.Client.Documents.Replication.Messages;
 using Raven.Client.Exceptions;
+using Raven.Server.Documents.Handlers;
 using Raven.Server.Documents.Replication.ReplicationItems;
 using Raven.Server.Documents.TcpHandlers;
+using Raven.Server.Documents.TimeSeries;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
 using Sparrow;
+using Sparrow.Json;
 using Sparrow.Json.Parsing;
 using Sparrow.Logging;
+using Sparrow.Server;
+using Sparrow.Threading;
 using Voron;
 
 namespace Raven.Server.Documents.Replication
@@ -34,6 +39,11 @@ namespace Raven.Server.Documents.Replication
         private OutgoingReplicationStatsScope _statsInstance;
         internal readonly ReplicationStats _stats = new ReplicationStats();
         public bool MissingAttachmentsInLastBatch { get; private set; }
+        private HashSet<Slice> _deduplicatedAttachmentHashes = new(SliceComparer.Instance);
+        private Queue<Slice> _deduplicatedAttachmentHashesLru = new();
+        private int _numberOfAttachmentsTrackedForDeduplication;
+        private ByteStringContext _context; // required to clone the hashes 
+
 
         public ReplicationDocumentSender(Stream stream, OutgoingReplicationHandler parent, Logger log, string[] pathsToSend, string[] destinationAcceptablePaths)
         {
@@ -48,6 +58,10 @@ namespace Raven.Server.Documents.Replication
             _shouldSkipSendingTombstones = _parent.Destination is PullReplicationAsSink sink && sink.Mode == PullReplicationMode.SinkToHub &&
                                            parent._outgoingPullReplicationParams?.PreventDeletionsMode?.HasFlag(PreventDeletionsMode.PreventSinkToHubDeletions) == true &&
                                            _parent._database.ForTestingPurposes?.ForceSendTombstones == false;
+            
+            _numberOfAttachmentsTrackedForDeduplication = parent._database.Configuration.Replication.MaxNumberOfAttachmentsTrackedForDeduplication;
+            _context = new ByteStringContext(SharedMultipleUseFlag.None);
+
         }
 
         public class MergedReplicationBatchEnumerator : IEnumerator<ReplicationBatchItem>
@@ -250,6 +264,8 @@ namespace Raven.Server.Documents.Replication
 
                             _parent.CancellationToken.ThrowIfCancellationRequested();
 
+                            AssertNoLegacyReplicationViolation(item);
+
                             if (replicationState.LastTransactionMarker != item.TransactionMarker)
                             {
                                 replicationState.Item = item;
@@ -385,6 +401,29 @@ namespace Raven.Server.Documents.Replication
             }
         }
 
+        private void AssertNoLegacyReplicationViolation(ReplicationBatchItem item)
+        {
+            if (_parent.SupportedFeatures.Replication.CountersBatch == false)
+            {
+                AssertNotCounterForLegacyReplication(item);
+            }
+
+            if (_parent.SupportedFeatures.Replication.ClusterTransaction == false)
+            {
+                AssertNotClusterTransactionDocumentForLegacyReplication(item);
+            }
+
+            if (_parent.SupportedFeatures.Replication.TimeSeries == false)
+            {
+                AssertNotTimeSeriesForLegacyReplication(item);
+            }
+
+            if (_parent.SupportedFeatures.Replication.IncrementalTimeSeries == false)
+            {
+                AssertNotIncrementalTimeSeriesForLegacyReplication(item);
+            }
+        }
+
         private bool CanContinueBatch(ReplicationState state, ref long next)
         {
             if (MissingAttachmentsInLastBatch)
@@ -410,19 +449,10 @@ namespace Raven.Server.Documents.Replication
                 }
             }
 
-            if (_parent.SupportedFeatures.Replication.TimeSeries == false)
+            if (state.NumberOfItemsSent == 0)
             {
-                AssertNotTimeSeriesForLegacyReplication(state.Item);
-            }
-
-            if (_parent.SupportedFeatures.Replication.CountersBatch == false)
-            {
-                AssertNotCounterForLegacyReplication(state.Item);
-            }
-
-            if (_parent.SupportedFeatures.Replication.ClusterTransaction == false)
-            {
-                AssertNotClusterTransactionDocumentForLegacyReplication(state.Item);
+                // always send at least one item
+                return true;
             }
 
             // We want to limit batch sizes to reasonable limits.
@@ -507,6 +537,42 @@ namespace Raven.Server.Documents.Replication
             }
         }
 
+        private void AssertNotIncrementalTimeSeriesForLegacyReplication(ReplicationBatchItem item)
+        {
+            if (item.Type == ReplicationBatchItem.ReplicationItemType.TimeSeriesSegment || item.Type == ReplicationBatchItem.ReplicationItemType.DeletedTimeSeriesRange)
+            {
+                using (_parent._database.DocumentsStorage.ContextPool.AllocateOperationContext(out JsonOperationContext context))
+                {
+                    LazyStringValue name;
+                    switch (item)
+                    {
+                        case TimeSeriesDeletedRangeItem timeSeriesDeletedRangeItem:
+                            TimeSeriesValuesSegment.ParseTimeSeriesKey(timeSeriesDeletedRangeItem.Key, context, out _, out name);
+                            break;
+                        case TimeSeriesReplicationItem timeSeriesReplicationItem:
+                            name = timeSeriesReplicationItem.Name;
+                            break;
+                        default:
+                            return;
+                    }
+
+                    if (TimeSeriesHandler.CheckIfIncrementalTs(name) == false)
+                        return;
+                }
+
+                // the other side doesn't support incremental time series, stopping replication
+                var message = $"{_parent.Node.FromString()} found an item of type 'IncrementalTimeSeries' to replicate to {_parent.Destination.FromString()}, " +
+                              $"while we are in legacy mode (downgraded our replication version to match the destination). " +
+                              $"Can't send Incremental-TimeSeries in legacy mode, destination {_parent.Destination.FromString()} does not support Incremental-TimeSeries feature. Stopping replication.";
+
+                if (_log.IsInfoEnabled)
+                    _log.Info(message);
+
+                throw new LegacyReplicationViolationException(message);
+            }
+        }
+
+
         private TimeSpan GetDelayReplication()
         {
             TimeSpan delayReplicationFor = TimeSpan.Zero;
@@ -588,7 +654,8 @@ namespace Raven.Server.Documents.Replication
 
             if (item is AttachmentReplicationItem attachment)
             {
-                _replicaAttachmentStreams[attachment.Base64Hash] = attachment;
+                if(ShouldSendAttachmentStream(attachment)) 
+                    _replicaAttachmentStreams[attachment.Base64Hash] = attachment;
 
                 if (MissingAttachmentsInLastBatch)
                     state.MissingAttachmentBase64Hashes?.Remove(attachment.Base64Hash);
@@ -598,14 +665,47 @@ namespace Raven.Server.Documents.Replication
             return true;
         }
 
+        private bool ShouldSendAttachmentStream(AttachmentReplicationItem attachment)
+        {
+            if (MissingAttachmentsInLastBatch)
+            {
+                // we intentionally not trying to de-duplicate in this scenario
+                // we may have _sent_ the attachment already, but it was deleted at 
+                // destination, so we need to send it again
+                return true;
+            }
+
+            if (_parent.SupportedFeatures.Replication.DeduplicatedAttachments == false)
+                return true;
+
+            // RavenDB does de-duplication of attachments on storage, but not over the wire
+            // Here we implement the same idea, if (in the current connection), we already sent
+            // an attachment, we will skip sending it to the other side since we _know_ it is 
+            // already there.
+            if (_deduplicatedAttachmentHashes.Contains(attachment.Base64Hash))
+                return false; // we already sent it over during the current run
+                    
+            var clone = attachment.Base64Hash.Clone(_context);
+            _deduplicatedAttachmentHashes.Add(clone);
+            _deduplicatedAttachmentHashesLru.Enqueue(clone);
+            while (_deduplicatedAttachmentHashesLru.Count > _numberOfAttachmentsTrackedForDeduplication)
+            {
+                var cur = _deduplicatedAttachmentHashesLru.Dequeue();
+                _deduplicatedAttachmentHashes.Remove(cur);
+                _context.Release(ref cur.Content);
+            }
+
+            return true;
+        }
+
         private bool ShouldSkip(ReplicationBatchItem item, OutgoingReplicationStatsScope stats, SkippedReplicationItemsInfo skippedReplicationItemsInfo)
         {
             if (ValidatorSaysToSkip(_pathsToSend) || ValidatorSaysToSkip(_destinationAcceptablePaths))
                 return true;
 
-            if (_shouldSkipSendingTombstones)
+            if (_shouldSkipSendingTombstones && ReplicationLoader.IsOfTypePreventDeletions(item))
             {
-                return ReplicationLoader.IsOfTypePreventDeletions(item);
+                return true;
             }
 
             switch (item)
@@ -623,7 +723,8 @@ namespace Raven.Server.Documents.Replication
                         // we let pass all the conflicted/resolved revisions, since we keep them with their original change vector which might be `AlreadyMerged` at the destination.
                         if (doc.Flags.Contain(DocumentFlags.Conflicted) ||
                             doc.Flags.Contain(DocumentFlags.Resolved) ||
-                            (doc.Flags.Contain(DocumentFlags.FromClusterTransaction)))
+                            doc.Flags.Contain(DocumentFlags.FromClusterTransaction) ||
+                            doc.Flags.Contain(DocumentFlags.FromOldDocumentRevision))
                         {
                             return false;
                         }
@@ -631,8 +732,12 @@ namespace Raven.Server.Documents.Replication
 
                     break;
 
-                case AttachmentReplicationItem _:
+                case AttachmentReplicationItem attachment:
                     if (MissingAttachmentsInLastBatch)
+                        return false;
+
+                    var type = AttachmentsStorage.GetAttachmentTypeByKey(attachment.Key);
+                    if (type == AttachmentType.Revision)
                     {
                         return false;
                     }
@@ -757,6 +862,7 @@ namespace Raven.Server.Documents.Replication
         {
             _pathsToSend?.Dispose();
             _destinationAcceptablePaths?.Dispose();
+            _context.Dispose();
         }
         private class ReplicationState
         {

@@ -2,7 +2,6 @@
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
-using FastTests;
 using Raven.Client.Documents;
 using Raven.Client.Documents.Operations;
 using Raven.Client.Documents.Operations.Backups;
@@ -21,18 +20,28 @@ namespace SlowTests.Server.Documents.PeriodicBackup.Restore
     {
         private readonly bool _isCustom;
         private readonly string _remoteFolderName;
+
         protected RestoreFromS3(ITestOutputHelper output, bool isCustom = false) : base(output)
         {
             _isCustom = isCustom;
             _remoteFolderName = GetRemoteFolder(GetType().Name);
         }
 
-        protected async Task can_backup_and_restore_internal()
+        protected async Task can_backup_and_restore_internal(string dbName = null)
         {
             var s3Settings = GetS3Settings();
-
-            using (var store = GetDocumentStore())
+            Options options = null;
+            if (dbName != null)
             {
+                options = new Options()
+                {
+                    ModifyDatabaseName = s => s + dbName
+                };
+            }
+
+            using (var store = GetDocumentStore(options: options))
+            {
+                
                 using (var session = store.OpenAsyncSession())
                 {
                     await session.StoreAsync(new User { Name = "oren" }, "users/1");
@@ -180,7 +189,7 @@ namespace SlowTests.Server.Documents.PeriodicBackup.Restore
         {
             var s3Settings = GetS3Settings();
 
-            var key = EncryptedServer(out var certificates, out string dbName);
+            var key = Encryption.EncryptedServer(out var certificates, out string dbName);
 
             using (var store = GetDocumentStore(new Options
             {
@@ -314,7 +323,7 @@ namespace SlowTests.Server.Documents.PeriodicBackup.Restore
         protected async Task incremental_and_full_backup_encrypted_db_and_restore_to_encrypted_DB_with_provided_key_internal()
         {
             var s3Settings = GetS3Settings();
-            var key = EncryptedServer(out var certificates, out string dbName);
+            var key = Encryption.EncryptedServer(out var certificates, out string dbName);
 
             using (var store = GetDocumentStore(new Options
             {
@@ -381,7 +390,7 @@ namespace SlowTests.Server.Documents.PeriodicBackup.Restore
 
         protected async Task snapshot_encrypted_db_and_restore_to_encrypted_DB_internal()
         {
-            var key = EncryptedServer(out var certificates, out string dbName);
+            var key = Encryption.EncryptedServer(out var certificates, out string dbName);
 
             var s3Settings = GetS3Settings();
             using (var store = GetDocumentStore(new Options
@@ -448,7 +457,10 @@ namespace SlowTests.Server.Documents.PeriodicBackup.Restore
             };
 
             if (_isCustom)
+            {
                 settings.CustomServerUrl = s3Settings.CustomServerUrl;
+                settings.ForcePathStyle = s3Settings.ForcePathStyle;
+            }
 
             return settings;
         }

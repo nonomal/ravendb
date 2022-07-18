@@ -12,7 +12,7 @@ import generateCertificateForReplicationCommand = require("commands/database/tas
 import replicationCertificateModel = require("models/database/tasks/replicationCertificateModel");
 import messagePublisher = require("common/messagePublisher");
 import fileDownloader = require("common/fileDownloader");
-import forge = require("forge/forge");
+import forge = require("node-forge");
 import clusterTopologyManager = require("common/shell/clusterTopologyManager");
 import generateReplicationCertificateConfirm = require("viewmodels/database/tasks/generateReplicationCertificateConfirm");
 import fileImporter = require("common/fileImporter");
@@ -26,16 +26,19 @@ import genUtils = require("common/generalUtils");
 import certificateUtils = require("common/certificateUtils");
 import viewHelpers = require("common/helpers/view/viewHelpers");
 import tasksCommonContent = require("models/database/tasks/tasksCommonContent");
+import accessManager = require("common/shell/accessManager");
 
 class editReplicationHubTask extends viewModelBase {
 
+    view = require("views/database/tasks/editReplicationHubTask.html");
+    
     editedHubTask = ko.observable<ongoingTaskReplicationHubEditModel>();
     editedReplicationAccessItem = ko.observable<replicationAccessHubModel>(null);
 
     private taskId: number = null;
     isNewTask = ko.observable<boolean>(true);
     
-    canDefineCertificates = location.protocol === "https:";
+    canDefineCertificates = accessManager.default.secureServer();
     
     possibleMentors = ko.observableArray<string>([]);
 

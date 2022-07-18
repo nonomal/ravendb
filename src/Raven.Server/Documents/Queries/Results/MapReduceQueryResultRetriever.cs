@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
 using Lucene.Net.Search;
 using Lucene.Net.Store;
 using Raven.Client;
@@ -76,7 +77,7 @@ namespace Raven.Server.Documents.Queries.Results
             return djv;
         }
 
-        protected override unsafe Document DirectGet(Lucene.Net.Documents.Document input, string id, DocumentFields fields, IState state)
+        public override unsafe Document DirectGet(Lucene.Net.Documents.Document input, string id, DocumentFields fields, IState state)
         {
             var storedValue = input.GetField(_storedValueFieldName).GetBinaryValue(state);
 
@@ -93,10 +94,10 @@ namespace Raven.Server.Documents.Queries.Results
             };
         }
 
-        public override (Document Document, List<Document> List) Get(Lucene.Net.Documents.Document input, ScoreDoc scoreDoc, IState state)
+        public override (Document Document, List<Document> List) Get(Lucene.Net.Documents.Document input, ScoreDoc scoreDoc, IState state, CancellationToken token)
         {
             if (FieldsToFetch.IsProjection)
-                return GetProjection(input, scoreDoc, null, state);
+                return GetProjection(input, scoreDoc, null, state, token);
 
             using (_storageScope = _storageScope?.Start() ?? RetrieverScope?.For(nameof(QueryTimingsScope.Names.Storage)))
             {

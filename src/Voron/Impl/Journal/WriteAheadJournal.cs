@@ -33,6 +33,7 @@ using Voron.Impl.FileHeaders;
 using Voron.Impl.Paging;
 using Voron.Util;
 using Constants = Voron.Global.Constants;
+using NativeMemory = Sparrow.Utils.NativeMemory;
 
 namespace Voron.Impl.Journal
 {
@@ -211,6 +212,12 @@ namespace Voron.Impl.Journal
 
                             if (lastReadHeaderPtr != null)
                             {
+                                if (lastFlushedJournal != -1 && lastReadHeaderPtr->TransactionId < lastFlushedTxId)
+                                {
+                                    throw new InvalidOperationException(
+                                        $"After recovering {pager} file we got tx {lastReadHeaderPtr->TransactionId} as the last one but it's lower than last flushed transaction - tx {lastFlushedTxId} (from {StorageEnvironmentOptions.JournalName(lastFlushedJournal)})");
+                                }
+
                                 *txHeader = *lastReadHeaderPtr;
                                 lastFlushedTxId = txHeader->TransactionId;
 
@@ -323,7 +330,7 @@ namespace Voron.Impl.Journal
                     "First transaction initializing the structure of Voron database is corrupted. Cannot access internal database metadata. Create a new database to recover.");
 
             Debug.Assert(lastFlushedTxId >= 0);
-            Debug.Assert(lastFlushedJournal >= 0);
+            // Debug.Assert(lastFlushedJournal >= 0); explicitly commented - it's valid state to not flush any pages from processed journal if we had already everything synced or journal was empty
             Debug.Assert(lastProcessedJournal >= 0);
 
             if (journalFiles.Count > 0)
@@ -361,7 +368,7 @@ namespace Voron.Impl.Journal
 #if DEBUG
                 if (instanceOfLastFlushedJournal == null)
                 {
-                    Debug.Assert(toDelete.Count == 0 || (toDelete.Count == 1 && deleteLastJournal),
+                    Debug.Assert(toDelete.Count == 0 || (toDelete.Count >= 1 && deleteLastJournal),
                         $"Last flushed journal (number: {lastFlushedJournal}) doesn't exist so we didn't call {nameof(_journalApplicator.SetLastFlushed)}" +
                         $" and didn't mark to delete last journal but," +
                         $" there are still some journals to delete ({string.Join(", ", toDelete.Select(x => x.Number))}. )");
@@ -589,7 +596,12 @@ namespace Voron.Impl.Journal
             public JournalApplicator(WriteAheadJournal waj)
             {
                 _waj = waj;
-                _flushLockTaskResponsible = new LockTaskResponsible(_flushingLock, waj._env.Token);
+                _flushLockTaskResponsible = new LockTaskResponsible(_flushingLock, waj._env.Token)
+                {
+#if DEBUG
+                    OnBeforeLockEnter = () => ThrowOnFlushLockEnterWhileWriteTransactionLockIsTaken()
+#endif
+                };
             }
 
 
@@ -605,6 +617,8 @@ namespace Voron.Impl.Journal
                 bool lockTaken = false;
                 try
                 {
+                    ThrowOnFlushLockEnterWhileWriteTransactionLockIsTaken();
+
                     Monitor.TryEnter(_flushingLock, timeToWait, ref lockTaken);
 
                     if (lockTaken == false)
@@ -620,6 +634,8 @@ namespace Voron.Impl.Journal
 
                     if (_waj._env.Disposed)
                         return;
+
+                    _forTestingPurposes?.OnApplyLogsToDataFileUnderFlushingLock?.Invoke();
 
                     var jrnls = GetJournalSnapshots();
 
@@ -989,6 +1005,8 @@ namespace Voron.Impl.Journal
                 }
                 finally
                 {
+                    ThrowOnFlushLockEnterWhileWriteTransactionLockIsTaken();
+
                     Monitor.Enter(_flushingLock);// reacquire the lock
                 }
             }
@@ -1006,6 +1024,9 @@ namespace Voron.Impl.Journal
             internal class TestingStuff
             {
                 internal Action OnUpdateJournalStateUnderWriteTransactionLock;
+
+                internal Action OnApplyLogsToDataFileUnderFlushingLock;
+
             }
 
             // This can take a LONG time, and it needs to run concurrently with the
@@ -1145,7 +1166,11 @@ namespace Voron.Impl.Journal
 
                     _currentTotalWrittenBytes = Interlocked.Read(ref _parent._totalWrittenButUnsyncedBytes);
                     _lastFlushed.Journal.SetLastReadTxHeader(_lastFlushed.TransactionId, ref _transactionHeader);
-                    if (_lastFlushed.TransactionId != _transactionHeader.TransactionId)
+
+                    if (_transactionHeader.HeaderMarker != Constants.TransactionHeaderMarker)
+                        return false;
+
+                    if ( _lastFlushed.TransactionId != _transactionHeader.TransactionId)
                     {
                         ThrowErrorWhenSyncingDataFile(_lastFlushed, _transactionHeader, _parent._waj._env);
                     }
@@ -1209,6 +1234,10 @@ namespace Voron.Impl.Journal
                     _token = token;
                 }
 
+#if DEBUG
+                public Action OnBeforeLockEnter { get; set; }
+#endif
+
                 public bool WaitForTaskToBeDone(Func<bool> task)
                 {
                     var current = new AssignedTask(task);
@@ -1229,6 +1258,9 @@ namespace Voron.Impl.Journal
                         while (true)
                         {
                             var isLockTaken = false;
+#if DEBUG
+                            OnBeforeLockEnter?.Invoke();
+#endif
                             Monitor.TryEnter(_lock, 0, ref isLockTaken);
                             if (isLockTaken)
                             {
@@ -1448,6 +1480,8 @@ namespace Voron.Impl.Journal
 
             public IDisposable TryTakeFlushingLock(ref bool lockTaken, TimeSpan? timeout = null)
             {
+                ThrowOnFlushLockEnterWhileWriteTransactionLockIsTaken();
+
                 if (timeout == null)
                 {
                     Monitor.TryEnter(_flushingLock, ref lockTaken);
@@ -1472,6 +1506,9 @@ namespace Voron.Impl.Journal
             public IDisposable TakeFlushingLock()
             {
                 bool lockTaken = false;
+
+                ThrowOnFlushLockEnterWhileWriteTransactionLockIsTaken();
+
                 Monitor.Enter(_flushingLock, ref lockTaken);
                 _ignoreLockAlreadyTaken = true;
 
@@ -1481,6 +1518,23 @@ namespace Voron.Impl.Journal
                     if (lockTaken)
                         Monitor.Exit(_flushingLock);
                 });
+            }
+
+            [Conditional("DEBUG")]
+            private void ThrowOnFlushLockEnterWhileWriteTransactionLockIsTaken()
+            {
+                var currentWriteTransactionHolder = _waj._env._currentWriteTransactionHolder;
+                var currentTxLockCount = _waj._env._transactionWriter.CurrentCount;
+
+                if (currentWriteTransactionHolder != null &&
+                    currentWriteTransactionHolder == NativeMemory.CurrentThreadStats)
+                {
+                    throw new InvalidOperationException("The flushing lock must be taken before acquiring the write transaction lock. " +
+                                                        "This check is supposed to prevent potential deadlock and guarantee the same order of taking those two locks." +
+                                                        $"(Thread holding the write tx lock - Name: '{currentWriteTransactionHolder.Name}', Id: {currentWriteTransactionHolder.ManagedThreadId}. " +
+                                                        $"Current thread - Id: {Thread.CurrentThread.ManagedThreadId}. " +
+                                                        $"Current tx lock count: {currentTxLockCount})");
+                }
             }
 
             internal void DeleteCurrentAlreadyFlushedJournal()

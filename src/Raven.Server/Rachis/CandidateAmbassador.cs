@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Raven.Client.Http;
 using Raven.Client.ServerWide;
+using Raven.Client.ServerWide.Tcp;
 using Raven.Server.Rachis.Remote;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
@@ -34,6 +35,7 @@ namespace Raven.Server.Rachis
         public AmbassadorStatus Status;
         private PoolOfThreads.LongRunningWork _candidateAmbassadorLongRunningWork;
         private readonly MultipleUseFlag _running = new MultipleUseFlag(true);
+
         public long TrialElectionWonAtTerm { get; set; }
         public long RealElectionWonAtTerm { get; set; }
         public volatile int ClusterCommandsVersion; // default is 0
@@ -41,7 +43,7 @@ namespace Raven.Server.Rachis
 
         private RemoteConnection _connection;
         private RemoteConnection _publishedConnection;
-
+        public Exception LastException;
         public CandidateAmbassador(RachisConsensus engine, Candidate candidate, string tag, string url)
         {
             _engine = engine;
@@ -50,6 +52,19 @@ namespace Raven.Server.Rachis
             _url = url;
             Status = AmbassadorStatus.Started;
             StatusMessage = $"Started Candidate Ambassador for {_engine.Tag} > {_tag}";
+        }
+
+        public NodeStatus GetStatus()
+        {
+            return new NodeStatus
+            {
+                Name = $"Candidate Ambassador for {_engine.Tag} > {_tag} in term {_engine.CurrentTerm}",
+                Connected = Status == AmbassadorStatus.Connected,
+                ErrorDetails = Status == AmbassadorStatus.Connected ? null : LastException?.ToString(),
+                LastReply = _connection?.Info?.LastReceived ?? DateTime.MinValue,
+                LastSent = _connection?.Info?.LastSent ?? DateTime.MinValue,
+                LastSentMessage = StatusMessage
+            };
         }
 
         public void Start()
@@ -108,6 +123,7 @@ namespace Raven.Server.Rachis
                     {
                         Stream stream;
                         Action disconnect;
+                        TcpConnectionHeaderMessage.SupportedFeatures.ClusterFeatures features;
                         try
                         {
                             var connectTask = _engine.ConnectToPeer(_url, _tag, _engine.ClusterCertificate);
@@ -119,11 +135,13 @@ namespace Raven.Server.Rachis
 
                             stream = connection.Stream;
                             disconnect = connection.Disconnect;
+                            features = connection.SupportedFeatures.Cluster;
                         }
                         catch (Exception e)
                         {
+                            LastException = e;
                             Status = AmbassadorStatus.FailedToConnect;
-                            StatusMessage = $"Failed to connect with {_tag}.{Environment.NewLine} " + e.Message;
+                            StatusMessage = $"Failed to obtain connection with {_tag}.";
                             if (_engine.Log.IsInfoEnabled)
                             {
                                 _engine.Log.Info($"CandidateAmbassador for {_tag}: Failed to connect to remote peer: " + _url, e);
@@ -139,7 +157,7 @@ namespace Raven.Server.Rachis
 
                         Stopwatch sp;
                         _connection?.Dispose();
-                        _connection = new RemoteConnection(_tag, _engine.Tag, _candidate.ElectionTerm, stream, disconnect);
+                        _connection = new RemoteConnection(_tag, _engine.Tag, _candidate.ElectionTerm, stream, features, disconnect);
 
                         using (_engine.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
                         {
@@ -315,11 +333,13 @@ namespace Raven.Server.Rachis
                     }
                     catch (Exception e) when (RachisConsensus.IsExpectedException(e) || e is RachisConcurrencyException)
                     {
+                        LastException = e;
                         NotifyAboutAmbassadorClosing(_connection, currentElectionTerm, e);
                         break;
                     }
                     catch (TopologyMismatchException e)
                     {
+                        LastException = e;
                         TopologyMismatch = true;
                         NotifyAboutAmbassadorClosing(_connection, currentElectionTerm, e);
                         _candidate.WaitForChangeInState();
@@ -327,8 +347,9 @@ namespace Raven.Server.Rachis
                     }
                     catch (Exception e)
                     {
+                        LastException = e;
                         Status = AmbassadorStatus.FailedToConnect;
-                        StatusMessage = $"Failed to get vote from {_tag}.{Environment.NewLine}" + e.Message;
+                        StatusMessage = $"Failed to get vote from {_tag}.";
                         if (_engine.Log.IsInfoEnabled)
                         {
                             _engine.Log.Info($"CandidateAmbassador for {_tag}: Failed to get vote from remote peer url={_url} tag={_tag}", e);
@@ -341,8 +362,9 @@ namespace Raven.Server.Rachis
             }
             catch (Exception e)
             {
+                LastException = e;
                 Status = AmbassadorStatus.FailedToConnect;
-                StatusMessage = $"Failed to talk to {_url}.{Environment.NewLine}" + e;
+                StatusMessage = $"Failed to talk to {_url}.";
                 if (_engine.Log.IsInfoEnabled)
                 {
                     _engine.Log.Info("Failed to talk to remote peer: " + _url, e);

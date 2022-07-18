@@ -27,6 +27,9 @@ namespace Raven.Server.Documents.Queries
         public int? Limit;
 
         [JsonDeserializationIgnore]
+        public int? FilterLimit { get; set; }
+        
+        [JsonDeserializationIgnore]
         public QueryMetadata Metadata { get; private set; }
 
         [JsonDeserializationIgnore]
@@ -35,6 +38,7 @@ namespace Raven.Server.Documents.Queries
         [JsonDeserializationIgnore]
         public SpatialDistanceFieldComparatorSource.SpatialDistanceFieldComparator Distances;
 
+        
         public new int Start
         {
 #pragma warning disable 618
@@ -82,7 +86,10 @@ namespace Raven.Server.Documents.Queries
 
         public bool AddTimeSeriesNames;
 
+        public bool DisableAutoIndexCreation;
+
         public bool IsStream;
+        public string ClientQueryId;
 
         public IndexQueryServerSide(string query, BlittableJsonReaderObject queryParameters = null)
         {
@@ -96,6 +103,7 @@ namespace Raven.Server.Documents.Queries
             QueryMetadataCache cache,
             RequestTimeTracker tracker,
             bool addSpatialProperties = false,
+            string clientQueryId = null,
             DocumentDatabase database = null,
             QueryType queryType = QueryType.Select)
         {
@@ -103,6 +111,7 @@ namespace Raven.Server.Documents.Queries
             try
             {
                 result = JsonDeserializationServer.IndexQuery(json);
+                result.ClientQueryId = clientQueryId;
 
                 if (result.PageSize == 0 && json.TryGet(nameof(PageSize), out int _) == false)
                     result.PageSize = int.MaxValue;
@@ -156,7 +165,7 @@ namespace Raven.Server.Documents.Queries
                     var start = (int)QueryBuilder.GetLongValue(result.Metadata.Query, result.Metadata, result.QueryParameters, result.Metadata.Query.Offset, 0);
                     result.Offset = start;
                     result.Start = result.Start != 0 || json.TryGet(nameof(Start), out int _)
-                        ? Math.Min(start, result.Start)
+                        ? Math.Max(start, result.Start)
                         : start;
                 }
 
@@ -166,10 +175,22 @@ namespace Raven.Server.Documents.Queries
                     result.Limit = limit;
                     result.PageSize = Math.Min(limit, result.PageSize);
                 }
+                
+                if (result.Metadata.Query.Limit != null)
+                {
+                    var limit = (int)QueryBuilder.GetLongValue(result.Metadata.Query, result.Metadata, result.QueryParameters, result.Metadata.Query.Limit, int.MaxValue);
+                    result.Limit = limit;
+                    result.PageSize = Math.Min(limit, result.PageSize);
+                }
+                
+                if (result.Metadata.Query.FilterLimit != null)
+                {
+                    result.FilterLimit = (int)QueryBuilder.GetLongValue(result.Metadata.Query, result.Metadata, result.QueryParameters, result.Metadata.Query.FilterLimit, int.MaxValue);
+                }
             }
         }
 
-        public static async Task<IndexQueryServerSide> CreateAsync(HttpContext httpContext, int start, int pageSize, JsonOperationContext context, RequestTimeTracker tracker, bool addSpatialProperties = false, string overrideQuery = null)
+        public static async Task<IndexQueryServerSide> CreateAsync(HttpContext httpContext, int start, int pageSize, JsonOperationContext context, RequestTimeTracker tracker, bool addSpatialProperties = false, string clientQueryId = null, string overrideQuery = null)
         {
             IndexQueryServerSide result = null;
             try
@@ -184,7 +205,8 @@ namespace Raven.Server.Documents.Queries
                     Query = Uri.UnescapeDataString(actualQuery),
                     // all defaults which need to have custom value
                     Start = start,
-                    PageSize = pageSize
+                    PageSize = pageSize,
+                    ClientQueryId = clientQueryId
                 };
 
                 foreach (var item in httpContext.Request.Query)
@@ -222,7 +244,7 @@ namespace Raven.Server.Documents.Queries
                 }
 
                 result.Metadata = new QueryMetadata(result.Query, result.QueryParameters, 0, addSpatialProperties);
-                
+
                 if (result.Metadata.HasTimings)
                     result.Timings = new QueryTimingsScope(start: false);
 
@@ -238,6 +260,11 @@ namespace Raven.Server.Documents.Queries
                     pageSize = (int)QueryBuilder.GetLongValue(result.Metadata.Query, result.Metadata, result.QueryParameters, result.Metadata.Query.Limit, int.MaxValue);
                     result.Limit = pageSize;
                     result.PageSize = Math.Min(result.PageSize, pageSize);
+                }
+                
+                if (result.Metadata.Query.FilterLimit != null)
+                {
+                    result.FilterLimit = (int)QueryBuilder.GetLongValue(result.Metadata.Query, result.Metadata, result.QueryParameters, result.Metadata.Query.FilterLimit, int.MaxValue);
                 }
 
                 if (tracker != null)
@@ -270,6 +297,9 @@ namespace Raven.Server.Documents.Queries
 
             if (indexQuery.Limit < 0)
                 throw new InvalidQueryException($"{nameof(Limit)} ({nameof(PageSize)}) cannot be negative, but was {indexQuery.Limit}.", indexQuery.Query, indexQuery.QueryParameters);
+
+            if (indexQuery.FilterLimit <= 0)
+                throw new InvalidQueryException($"{nameof(FilterLimit)} cannot be negative or zero, but was {indexQuery.FilterLimit}.", indexQuery.Query, indexQuery.QueryParameters);
 
             if (indexQuery.Start < 0)
                 throw new InvalidQueryException($"{nameof(Start)} cannot be negative, but was {indexQuery.Start}.", indexQuery.Query, indexQuery.QueryParameters);

@@ -4,13 +4,16 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using FastTests;
 using FastTests.Client.Subscriptions;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Raven.Client;
+using Raven.Client.Documents;
+using Raven.Client.Documents.Commands;
 using Raven.Client.Documents.Operations.Backups;
 using Raven.Client.Documents.Operations.TimeSeries;
 using Raven.Client.Documents.Smuggler;
@@ -18,16 +21,22 @@ using Raven.Client.Documents.Subscriptions;
 using Raven.Client.Exceptions.Database;
 using Raven.Client.Exceptions.Documents.Subscriptions;
 using Raven.Client.Extensions;
+using Raven.Client.Http;
 using Raven.Client.ServerWide.Operations;
+using Raven.Server.Config;
+using Raven.Server.Documents;
 using Raven.Server.Documents.Replication;
 using Raven.Server.Documents.Subscriptions;
 using Raven.Server.ServerWide.Context;
+using Raven.Server.Web.System;
 using Raven.Tests.Core.Utils.Entities;
 using Sparrow;
+using Sparrow.Json;
 using Sparrow.Server;
-using Tests.Infrastructure;
 using Xunit;
 using Xunit.Abstractions;
+using DisposableAction = Voron.Util.DisposableAction;
+using JsonSerializer = System.Text.Json.JsonSerializer;
 
 namespace SlowTests.Client.Subscriptions
 {
@@ -72,6 +81,54 @@ namespace SlowTests.Client.Subscriptions
                 subscription.Run(x => docs.Signal(x.NumberOfItemsInBatch));
 
                 Assert.True(docs.Wait(_reasonableWaitTime));
+            }
+        }
+
+        [Fact]
+        public async Task SubscriptionsBatchSizeShouldIgnoreSkippedItems()
+        {
+            using (var store = GetDocumentStore())
+            {
+                var sub = store.Subscriptions.Create(new SubscriptionCreationOptions<User>
+                {
+                    Filter = user => user.Count > 0
+                });
+
+                var subscription = store.Subscriptions.GetSubscriptionWorker<User>(
+                    new SubscriptionWorkerOptions(sub)
+                    {
+                        TimeToWaitBeforeConnectionRetry = TimeSpan.FromSeconds(5),
+                        MaxDocsPerBatch = 2
+                    });
+
+                using (var session = store.OpenSession())
+                {
+                    for (int i = 0; i < 10; i++)
+                    {
+                        session.Store(new User { Count = 1 });
+                    }
+                    session.SaveChanges();
+                }
+
+                _ = subscription.Run(async x =>
+                {
+                    using var session = x.OpenAsyncSession();
+
+                    foreach (var item in x.Items)
+                    {
+                        item.Result.Count--;
+                    }
+
+                    await session.SaveChangesAsync();
+                });
+
+                await AssertWaitForCountAsync(async () =>
+                {
+                    using (var session = store.OpenAsyncSession())
+                    {
+                        return await session.Query<User>().Where(u => u.Count > 0).ToListAsync();
+                    }
+                }, 0);
             }
         }
 
@@ -454,14 +511,14 @@ namespace SlowTests.Client.Subscriptions
                     Assert.Equal(newQuery, newState.Query);
                     Assert.Equal(state.SubscriptionId, newState.SubscriptionId);
 
-                    var db = await GetDocumentDatabaseInstanceFor(store, store.Database);
+                    var db = await Databases.GetDocumentDatabaseInstanceFor(store, store.Database);
                     using (db.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
                     using (ctx.OpenReadTransaction())
                     {
                         var query = WaitForValue(() =>
                         {
-                            var connectionState = db.SubscriptionStorage.GetSubscriptionConnection(ctx, state.SubscriptionName);
-                            return connectionState?.Connection?.SubscriptionState.Query;
+                            var connectionState = db.SubscriptionStorage.GetSubscriptionConnectionsState(ctx, state.SubscriptionName);
+                            return connectionState?.GetConnections().FirstOrDefault()?.SubscriptionState.Query;
                         }, newQuery);
 
                         Assert.Equal(newQuery, query);
@@ -538,15 +595,15 @@ namespace SlowTests.Client.Subscriptions
                 Assert.Equal(newQuery, newState.Query);
                 Assert.Equal(state.SubscriptionId, newState.SubscriptionId);
 
-                var db = await GetDocumentDatabaseInstanceFor(store, store.Database);
+                var db = await Databases.GetDocumentDatabaseInstanceFor(store, store.Database);
                 using (db.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
                 using (ctx.OpenReadTransaction())
                 {
                     var query = WaitForValue(() =>
                     {
-                        var connectionState = db.SubscriptionStorage.GetSubscriptionConnection(ctx, state.SubscriptionName);
+                        var connectionState = db.SubscriptionStorage.GetSubscriptionConnectionsState(ctx, state.SubscriptionName);
 
-                        return connectionState?.Connection?.SubscriptionState.Query;
+                        return connectionState?.GetConnections().FirstOrDefault()?.SubscriptionState.Query;
                     }, newQuery);
 
                     Assert.Equal(newQuery, query);
@@ -629,15 +686,15 @@ namespace SlowTests.Client.Subscriptions
                 Assert.Equal(state.SubscriptionName, newState.SubscriptionName);
                 Assert.Equal(newQuery, newState.Query);
                 Assert.Equal(state.SubscriptionId, newState.SubscriptionId);
-                var db = await GetDocumentDatabaseInstanceFor(store, store.Database);
+                var db = await Databases.GetDocumentDatabaseInstanceFor(store, store.Database);
                 using (db.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
                 using (ctx.OpenReadTransaction())
                 {
                     var query = WaitForValue(() =>
                     {
-                        var connectionState = db.SubscriptionStorage.GetSubscriptionConnection(ctx, state.SubscriptionName);
+                        var connectionState = db.SubscriptionStorage.GetSubscriptionConnectionsState(ctx, state.SubscriptionName);
 
-                        return connectionState?.Connection?.SubscriptionState.Query;
+                        return connectionState?.GetConnections().FirstOrDefault()?.SubscriptionState.Query;
                     }, newQuery);
 
                     Assert.Equal(newQuery, query);
@@ -690,7 +747,7 @@ namespace SlowTests.Client.Subscriptions
                 finally
                 {
                     Assert.NotNull(ex);
-                    Assert.True(ex is DatabaseDoesNotExistException || ex is SubscriptionDoesNotExistException);
+                    Assert.True(ex is DatabaseDoesNotExistException || ex is SubscriptionDoesNotExistException, ex.ToString());
                     Assert.Contains(
                         ex is SubscriptionDoesNotExistException
                             ? $"Stopping subscription '{subscription.SubscriptionName}' on node A, because database '{store.Database}' is being deleted."
@@ -1061,6 +1118,349 @@ namespace SlowTests.Client.Subscriptions
                 var status = WaitForValue(() => t.Status, TaskStatus.RanToCompletion);
                 Assert.Equal(TaskStatus.RanToCompletion, status);
                 Assert.True(t.IsCompletedSuccessfully, "t.IsCompletedSuccessfully");
+            }
+        }
+
+        [Fact]
+        public async Task Worker_should_consider_RegisterSubscriptionConnection_time_on_calculation_of_LastConnectionFailure()
+        {
+            DoNotReuseServer();
+            var maxErroneousPeriod = TimeSpan.FromSeconds(1);
+            using (var store = GetDocumentStore())
+            {
+                var id1 = store.Subscriptions.Create(new SubscriptionCreationOptions<Company>());
+                var workerOptions1 = new SubscriptionWorkerOptions(id1) { Strategy = SubscriptionOpeningStrategy.WaitForFree, MaxErroneousPeriod = maxErroneousPeriod };
+
+                var worker1Ack = new AsyncManualResetEvent();
+                AsyncManualResetEvent worker1Retry = null;
+
+                using var worker1 = store.Subscriptions.GetSubscriptionWorker<Company>(workerOptions1, store.Database);
+                worker1.AfterAcknowledgment += _ =>
+                {
+                    worker1Ack.Set();
+                    return Task.CompletedTask;
+                };
+                worker1.OnSubscriptionConnectionRetry += exception =>
+                {
+                    worker1Retry?.Set();
+                };
+                var t1 = worker1.Run(x => { });
+
+                using (var session = store.OpenSession())
+                {
+                    session.Store(new Company());
+                    session.SaveChanges();
+                }
+                await worker1Ack.WaitAsync(_reasonableWaitTime);
+
+                var worker2Ack = new AsyncManualResetEvent();
+                ManualResetEvent worker2Retry = null;
+                using var worker2 = store.Subscriptions.GetSubscriptionWorker<Company>(workerOptions1, store.Database);
+                AsyncManualResetEvent worker1AfterRegisterSubscriptionConnection = null;
+                worker2.OnSubscriptionConnectionRetry += async exception =>
+                {
+                    worker2Retry?.Set();
+                    if (worker1AfterRegisterSubscriptionConnection == null)
+                        return;
+
+                    await worker1AfterRegisterSubscriptionConnection.WaitAsync(_reasonableWaitTime);
+                };
+                worker2.AfterAcknowledgment += _ =>
+                {
+                    worker2Ack.Set();
+                    return Task.CompletedTask;
+                };
+
+                var t2 = worker2.Run(x => { });
+
+                var db = await Databases.GetDocumentDatabaseInstanceFor(store);
+                var testingStuff = db.ForTestingPurposesOnly();
+
+                var subscriptionInterrupt = new AsyncManualResetEvent();
+                using (testingStuff.CallDuringWaitForChangedDocuments(() =>
+                       {
+                           worker1Retry ??= new AsyncManualResetEvent();
+                           subscriptionInterrupt.Set();
+                           throw new SubscriptionDoesNotBelongToNodeException($"DROPPED BY TEST") { AppropriateNode = null };
+                       }))
+                {
+                    await subscriptionInterrupt.WaitAsync(_reasonableWaitTime);
+                }
+
+                await worker1Retry.WaitAsync(_reasonableWaitTime);
+                using (var session = store.OpenSession())
+                {
+                    session.Store(new Company());
+                    session.SaveChanges();
+                }
+
+                await worker2Ack.WaitAsync(_reasonableWaitTime);
+
+                var waitedForFreeDuration = (maxErroneousPeriod * 2).Ticks;
+                var failed = false;
+                worker1AfterRegisterSubscriptionConnection = new AsyncManualResetEvent();
+                using (testingStuff.CallAfterRegisterSubscriptionConnection(_ =>
+                       {
+                           if (worker2Retry.WaitOne(_reasonableWaitTime) == false)
+                           {
+                               failed = true;
+                           }
+                           worker1Retry.Reset(true);
+                           worker1AfterRegisterSubscriptionConnection.Set();
+                           throw new SubscriptionDoesNotBelongToNodeException($"DROPPED BY TEST") { AppropriateNode = null, RegisterConnectionDurationInTicks = waitedForFreeDuration };
+                       }))
+                {
+                    subscriptionInterrupt.Reset(true);
+                    using (testingStuff.CallDuringWaitForChangedDocuments(() =>
+                           {
+                               // drop subscription
+                               worker2Retry ??= new ManualResetEvent(false);
+                               subscriptionInterrupt.Set();
+                               throw new SubscriptionDoesNotBelongToNodeException($"DROPPED BY TEST") { AppropriateNode = null };
+                           }))
+                    {
+                        Assert.True(await subscriptionInterrupt.WaitAsync(_reasonableWaitTime));
+                    }
+
+                    await worker1AfterRegisterSubscriptionConnection.WaitAsync(_reasonableWaitTime);
+                }
+                Assert.False(failed, "failed");
+
+                Assert.True(await worker1Retry.WaitAsync(_reasonableWaitTime));
+                Assert.False(t1.IsFaulted);
+                Assert.False(t2.IsFaulted);
+            }
+        }
+
+        [Fact]
+        public async Task EnsureSingleSubscriptionDoesNotContinueBeforeAckSent()
+        {
+            using (var store = GetDocumentStore())
+            {
+                var subscriptionName = await store.Subscriptions.CreateAsync(new() {Query = "from Users"});
+
+                using (var session = store.OpenAsyncSession())
+                {
+                    await session.StoreAsync(new User());
+                    await session.SaveChangesAsync();
+                }
+
+                var holdAck = new AsyncManualResetEvent();
+                var tryTriggerNextBatch = new AsyncManualResetEvent();
+
+                var firstCV = "";
+
+                using (var worker = store.Subscriptions.GetSubscriptionWorker<User>(new SubscriptionWorkerOptions(subscriptionName) {MaxDocsPerBatch = 1}))
+                {
+                    _ = worker.Run(async batch =>
+                    {
+                        firstCV = batch.Items[0].ChangeVector;
+                        tryTriggerNextBatch.Set();
+                        await holdAck.WaitAsync();
+                    });
+
+                    await tryTriggerNextBatch.WaitAsync();
+                    using (var session = store.OpenAsyncSession())
+                    {
+                        await session.StoreAsync(new User());
+                        await session.SaveChangesAsync();
+                    }
+
+                    string lastChangeVectorSent = null;
+                    Assert.True(await WaitForValueAsync(async () =>
+                    {
+                        var db = await Databases.GetDocumentDatabaseInstanceFor(store, store.Database);
+                        using (db.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
+                        using (ctx.OpenReadTransaction())
+                        {
+                            var connectionState = db.SubscriptionStorage.GetSubscriptionConnectionsState(ctx, subscriptionName);
+                            if (connectionState == null)
+                                return false;
+                          
+                            lastChangeVectorSent = connectionState.LastChangeVectorSent;
+
+                            return lastChangeVectorSent != null;
+                        }
+                    }, true, interval: 500));
+
+                    Assert.Equal(firstCV, lastChangeVectorSent); //make sure LastChangeVectorSent didn't advance in server even though there was no ack
+
+                    holdAck.Set();
+                }
+            }
+        }
+
+        [Fact]
+        public async Task WaitingSubscriptionShouldBeRegisteredInSubscriptionConnections()
+        {
+            using (var store = GetDocumentStore())
+            {
+                var subsId = await store.Subscriptions.CreateAsync(new SubscriptionCreationOptions { Query = "from Users", Name = "Subscription0" });
+
+                List<Task> workerTasks = new List<Task>();
+                var finishedWorkersCde = new CountdownEvent(2);
+
+                var mre1 = new AsyncManualResetEvent();
+                var mreConnect1 = new AsyncManualResetEvent();
+                var mre2 = new AsyncManualResetEvent();
+                var mreConnect2 = new AsyncManualResetEvent();
+                using var subsWorker1 = store.Subscriptions.GetSubscriptionWorker(new SubscriptionWorkerOptions(subsId)
+                {
+                    Strategy = SubscriptionOpeningStrategy.WaitForFree
+                });
+                subsWorker1.OnEstablishedSubscriptionConnection += () =>
+                {
+                    mreConnect1.Set();
+                };
+                var t1 = subsWorker1.Run(_ => { mre1.Set(); }).ContinueWith(res =>
+                {
+                    finishedWorkersCde.Signal();
+                });
+
+                Assert.True(await mreConnect1.WaitAsync(_reasonableWaitTime));
+
+                using var subsWorker2 = store.Subscriptions.GetSubscriptionWorker(new SubscriptionWorkerOptions(subsId)
+                {
+                    Strategy = SubscriptionOpeningStrategy.WaitForFree
+                });
+                subsWorker2.OnEstablishedSubscriptionConnection += () =>
+                {
+                    mreConnect2.Set();
+                };
+                var t2 = subsWorker2.Run(_ => { mre2.Set(); }).ContinueWith(res =>
+                {
+                    finishedWorkersCde.Signal();
+                });
+
+                workerTasks.Add(t1);
+                workerTasks.Add(t2);
+                using (var session = store.OpenAsyncSession())
+                {
+                    await session.StoreAsync(new User());
+                    await session.SaveChangesAsync();
+                }
+                Assert.True(await mre1.WaitAsync(_reasonableWaitTime));
+
+                await AssertRunningSubscriptionAndDrop(store);
+
+                // waiting subscription connects
+                Assert.True(await mreConnect2.WaitAsync(_reasonableWaitTime));
+                using (var session = store.OpenAsyncSession())
+                {
+                    await session.StoreAsync(new User());
+                    await session.SaveChangesAsync();
+                }
+                // waiting subscription process document
+                Assert.True(await mre2.WaitAsync(_reasonableWaitTime));
+
+                await AssertRunningSubscriptionAndDrop(store);
+
+                // both workers should be disconnected
+                Assert.True(finishedWorkersCde.Wait(_reasonableWaitTime));
+                Assert.All(workerTasks, task => Assert.True(task.IsCompleted));
+            }
+        }
+
+        [Fact]
+        public async Task DatabaseShouldNotGetIdleWhenTHereIsActiveSubscriptionConnection()
+        {
+            using var server = GetNewServer(new ServerCreationOptions
+            {
+                CustomSettings = new Dictionary<string, string>
+                {
+                    [RavenConfiguration.GetKey(x => x.Databases.MaxIdleTime)] = "10",
+                    [RavenConfiguration.GetKey(x => x.Databases.FrequencyToCheckForIdle)] = "3",
+                    [RavenConfiguration.GetKey(x => x.Core.RunInMemory)] = "false"
+                }
+            });
+
+            using var store = GetDocumentStore(new Options { Server = server, RunInMemory = false });
+            using var dispose = new DisposableAction(() => server.ServerStore.DatabasesLandlord.SkipShouldContinueDisposeCheck = false);
+            server.ServerStore.DatabasesLandlord.SkipShouldContinueDisposeCheck = true;
+
+            var db = await GetDatabase(server, store.Database);
+            var subsId = await store.Subscriptions.CreateAsync(new SubscriptionCreationOptions { Query = "from Users", Name = Guid.NewGuid().ToString() });
+            using var subsWorker1 = store.Subscriptions.GetSubscriptionWorker(new SubscriptionWorkerOptions(subsId));
+            var mreConnect1 = new AsyncManualResetEvent();
+            subsWorker1.AfterAcknowledgment += _ =>
+            {
+                mreConnect1.Set();
+                return Task.CompletedTask;
+            };
+            var t1 = subsWorker1.Run(_ => { }).ContinueWith(res => { });
+
+            using (var session = store.OpenSession())
+            {
+                session.Store(new User(), "Users/1");
+                session.SaveChanges();
+            }
+
+            Assert.True(await mreConnect1.WaitAsync(_reasonableWaitTime));
+            List<SubscriptionState> states;
+            var re =  store.GetRequestExecutor();
+            using (var context = JsonOperationContext.ShortTermSingleUse())
+            {
+                var cmd = new GetRunningSubscriptionsCommand(0, int.MaxValue);
+                await re.ExecuteAsync(cmd, context);
+                states = cmd.Result.ToList();
+            }
+            Assert.Equal(1, states.Count);
+
+            Assert.True(await WaitForValueAsync(async () =>
+            {
+                var url = Uri.EscapeDataString($"{store.Urls.First()}/admin/debug/databases/idle");
+                var raw = (await re.HttpClient.GetAsync($"{store.Urls.First()}/admin/debug/databases/idle")).Content.ReadAsStringAsync().Result;
+                var idleDatabaseStatistics = JsonConvert.DeserializeObject<IdleDatabaseStatistics>(raw);
+                if(idleDatabaseStatistics == null)
+                    return false;
+                if (1 != idleDatabaseStatistics.Results.Count)
+                    return false;
+
+                var stats = idleDatabaseStatistics.Results.FirstOrDefault();
+                if (stats == null)
+                    return false;
+
+                if (stats.Explanations.Any(s => s.StartsWith("Cannot unload database because number of Subscriptions connections")))
+                    return true;
+
+                return false;
+            }, true, timeout: 60000, interval: 1000), $"WaitForValue=>LastRecentlyUsed");
+        }
+
+        private class IdleDatabaseStatistics
+        {
+            public string MaxIdleTime { get; set; }
+            public string FrequencyToCheckForIdle { get; set; }
+            public List<DatabasesDebugHandler.IdleDatabaseStatistics> Results { get; set; }
+        }
+
+        private class GetRunningSubscriptionsCommand : GetSubscriptionsCommand
+        {
+            public GetRunningSubscriptionsCommand(int start, int pageSize) : base(start, pageSize)
+            {
+            }
+
+            public override HttpRequestMessage CreateRequest(JsonOperationContext ctx, ServerNode node, out string url)
+            {
+                var req = base.CreateRequest(ctx, node, out url);
+                url = $"{url}&running=true";
+                return req;
+            }
+        }
+
+        private async Task AssertRunningSubscriptionAndDrop(DocumentStore store)
+        {
+            DocumentDatabase db = await Server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(store.Database);
+            using (Server.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext context))
+            using (context.OpenReadTransaction())
+            {
+                var name = $"Subscription0";
+                var subscription = db
+                    .SubscriptionStorage
+                    .GetRunningSubscription(context, null, name, false);
+                Assert.NotNull(subscription);
+                db.SubscriptionStorage.DropSubscriptionConnections(subscription.SubscriptionId,
+                    new SubscriptionClosedException("Dropped by Test"));
             }
         }
 

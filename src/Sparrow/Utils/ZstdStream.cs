@@ -57,7 +57,7 @@ namespace Sparrow.Utils
                 {
                     var output = new ZstdLib.ZSTD_outBuffer {Source = pBuffer, Position = UIntPtr.Zero, Size = (UIntPtr)buffer.Length};
                     var input = new ZstdLib.ZSTD_inBuffer {Source = pOutput, Position = UIntPtr.Zero, Size = (UIntPtr)_decompressionInput.Length};
-                    var v = ZstdLib.ZSTD_decompressStream(_compressContext.Streaming, &output, &input);
+                    var v = ZstdLib.ZSTD_decompressStream(_compressContext.Decompression, &output, &input);
                     ZstdLib.AssertZstdSuccess(v);
                     _compressedBytesCount += (long)input.Position;
                     _uncompressedBytesCount += (long)output.Position;
@@ -161,6 +161,10 @@ namespace Sparrow.Utils
             {
                 var (outputBytes, inputBytes, _) = CompressStep(buffer, ZstdLib.ZSTD_EndDirective.ZSTD_e_continue);
                 buffer = buffer.Slice(inputBytes);
+                
+                if (outputBytes == 0)
+                    continue;
+                
                 _inner.Write(_tempBuffer, 0, outputBytes);
             }
         }
@@ -184,6 +188,10 @@ namespace Sparrow.Utils
             {
                 var (outputBytes, inputBytes, _) = CompressStep(buffer.Span, ZstdLib.ZSTD_EndDirective.ZSTD_e_continue);
                 buffer = buffer.Slice(inputBytes);
+                
+                if (outputBytes == 0)
+                    continue;
+
                 await _inner.WriteAsync(_tempBuffer, 0, outputBytes, cancellationToken).ConfigureAwait(false);
             }
         }

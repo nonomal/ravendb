@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -305,7 +306,7 @@ namespace Raven.Server
             TrafficWatchManager.DispatchMessage(twn);
         }
 
-        private void MaybeAddAdditionalExceptionData(DynamicJsonValue djv, Exception exception)
+        private static void MaybeAddAdditionalExceptionData(DynamicJsonValue djv, Exception exception)
         {
             if (exception is IndexCompilationException indexCompilationException)
             {
@@ -319,6 +320,21 @@ namespace Raven.Server
                 djv[nameof(DocumentConflictException.DocId)] = documentConflictException.DocId;
                 djv[nameof(DocumentConflictException.LargestEtag)] = documentConflictException.LargestEtag;
             }
+
+            if (exception is ConcurrencyException concurrencyException)
+            {
+                djv[nameof(ConcurrencyException.Id)] = concurrencyException.Id;
+                djv[nameof(ConcurrencyException.ExpectedChangeVector)] = concurrencyException.ExpectedChangeVector;
+                djv[nameof(ConcurrencyException.ActualChangeVector)] = concurrencyException.ActualChangeVector;
+            }
+
+            if (exception is RavenTimeoutException timeoutException)
+            {
+                djv[nameof(RavenTimeoutException.FailImmediately)] = timeoutException.FailImmediately;
+            }
+
+            if (exception is ClusterTransactionConcurrencyException { ConcurrencyViolations: { } } ctxConcurrencyException)
+                djv[nameof(ClusterTransactionConcurrencyException.ConcurrencyViolations)] = new DynamicJsonArray(ctxConcurrencyException.ConcurrencyViolations.Select(c => c.ToJson()));
         }
 
         private static void MaybeSetExceptionStatusCode(HttpContext httpContext, ServerStore serverStore, Exception exception)
@@ -361,7 +377,7 @@ namespace Raven.Server
                 exception is DatabaseConcurrentLoadTimeoutException ||
                 exception is NodeIsPassiveException ||
                 exception is ClientVersionMismatchException ||
-                exception is DatabaseSchemaErrorException || 
+                exception is DatabaseSchemaErrorException ||
                 exception is DatabaseIdleException
                 )
             {
@@ -388,7 +404,7 @@ namespace Raven.Server
                 return;
             }
 
-            if (exception is TimeoutException)
+            if (exception is TimeoutException or RavenTimeoutException)
             {
                 response.StatusCode = (int)HttpStatusCode.RequestTimeout;
                 return;
@@ -404,6 +420,12 @@ namespace Raven.Server
             {
                 response.StatusCode = (int)HttpStatusCode.Gone;
                 response.Headers.Add("Cache-Control", new Microsoft.Extensions.Primitives.StringValues(new[] { "must-revalidate", "no-cache" }));
+                return;
+            }
+
+            if (exception is IndexCompactionInProgressException)
+            {
+                response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
                 return;
             }
 

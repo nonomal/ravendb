@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Raven.Client.ServerWide.Tcp;
 using Raven.Server.Rachis.Json.Sync;
 using Raven.Server.ServerWide;
 using Sparrow;
@@ -21,6 +22,7 @@ namespace Raven.Server.Rachis.Remote
         private string _destTag;
         private string _src;
         private readonly Stream _stream;
+        private readonly TcpConnectionHeaderMessage.SupportedFeatures.ClusterFeatures _features;
         private readonly JsonOperationContext.MemoryBuffer _buffer;
         private readonly JsonOperationContext _context;
         private readonly IDisposable _releaseBuffer;
@@ -32,17 +34,19 @@ namespace Raven.Server.Rachis.Remote
         public string Source => _src;
         public Stream Stream => _stream;
         public string Dest => _destTag;
+        public TcpConnectionHeaderMessage.SupportedFeatures.ClusterFeatures Features => _features;
 
-        public RemoteConnection(string src, long term, Stream stream, Action disconnect, [CallerMemberName] string caller = null)
-            : this(dest: "?", src, term, stream, disconnect, caller)
+        public RemoteConnection(string src, long term, Stream stream, TcpConnectionHeaderMessage.SupportedFeatures.ClusterFeatures features, Action disconnect, [CallerMemberName] string caller = null)
+            : this(dest: "?", src, term, stream,features, disconnect, caller)
         {
         }
 
-        public RemoteConnection(string dest, string src, long term, Stream stream, Action disconnect, [CallerMemberName] string caller = null)
+        public RemoteConnection(string dest, string src, long term, Stream stream, TcpConnectionHeaderMessage.SupportedFeatures.ClusterFeatures features, Action disconnect, [CallerMemberName] string caller = null)
         {
             _destTag = dest;
             _src = src;
             _stream = stream;
+            _features = features;
             _disconnect = disconnect;
             _context = JsonOperationContext.ShortTermSingleUse();
             _releaseBuffer = _context.GetMemoryBuffer(out _buffer);
@@ -58,9 +62,14 @@ namespace Raven.Server.Rachis.Remote
             public string Destination;
             public int Number;
             public long Term;
+
+            public DateTime LastSent;
+            public DateTime LastReceived;
         }
 
         private RemoteConnectionInfo _info;
+        public RemoteConnectionInfo Info => _info;
+
         private static int _connectionNumber = 0;
         public static ConcurrentSet<RemoteConnectionInfo> RemoteConnectionsList = new ConcurrentSet<RemoteConnectionInfo>();
 
@@ -98,6 +107,7 @@ namespace Raven.Server.Rachis.Remote
             using (var writer = new RachisBlittableJsonTextWriter(context, _stream, afterFlush))
             {
                 context.Write(writer, msg);
+                _info.LastSent = DateTime.UtcNow;
             }
         }
 
@@ -302,6 +312,8 @@ namespace Raven.Server.Rachis.Remote
             {
                 json.BlittableValidation();
                 ValidateMessage(typeof(T).Name, json);
+                
+                _info.LastReceived = DateTime.UtcNow;
                 return JsonDeserializationRachis<T>.Deserialize(json);
             }
         }
@@ -367,6 +379,7 @@ namespace Raven.Server.Rachis.Remote
                 [nameof(AppendEntriesResponse.Message)] = aer.Message,
                 [nameof(AppendEntriesResponse.CurrentTerm)] = aer.CurrentTerm,
                 [nameof(AppendEntriesResponse.LastLogIndex)] = aer.LastLogIndex,
+                [nameof(AppendEntriesResponse.LastCommitIndex)] = aer.LastCommitIndex,
             };
 
             Send(context, msg);
@@ -379,6 +392,17 @@ namespace Raven.Server.Rachis.Remote
 
         private void DisposeInternal()
         {
+            try
+            {
+                //  we dispose here the stream explicitly to avoid waiting indefinitely on the stream.Read method
+                // which will prevent us continue the dispose, since the Read is wrapped with _disposerLock.EnsureNotDisposed()
+                _stream?.Dispose();
+            }
+            catch
+            {
+                // don't care
+            }
+
             using (_disposerLock.StartDisposing())
             {
                 RemoteConnectionsList.TryRemove(_info);

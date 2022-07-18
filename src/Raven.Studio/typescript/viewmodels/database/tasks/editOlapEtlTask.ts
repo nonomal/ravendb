@@ -32,6 +32,7 @@ import virtualGridController = require("widgets/virtualGrid/virtualGridControlle
 import textColumn = require("widgets/virtualGrid/columns/textColumn");
 import virtualColumn = require("widgets/virtualGrid/columns/virtualColumn");
 import virtualGrid = require("widgets/virtualGrid/virtualGrid");
+import { highlight, languages } from "prismjs";
 
 class partitionTable {
     key: string;
@@ -166,7 +167,7 @@ class olapTaskTestMode {
                             const metaDto = docDto["@metadata"];
                             documentMetadata.filterMetadata(metaDto);
                             const text = JSON.stringify(docDto, null, 4);
-                            this.loadedDocument(Prism.highlight(text, (Prism.languages as any).javascript));
+                            this.loadedDocument(highlight(text, languages.javascript, "js"));
                             this.loadedDocumentId(doc.getId());
 
                             $('.test-container a[href="#documentPreview"]').tab('show');
@@ -194,16 +195,21 @@ class olapTaskTestMode {
             new testOlapEtlCommand(this.db(), dto)
                 .execute()
                 .done((testResult: Raven.Server.Documents.ETL.Providers.OLAP.Test.OlapEtlTestScriptResult) => {
-                    this.testResults(testResult.ItemsByPartition.map(x => new partitionTable(x)));
+                    const $testResults = '.test-container a[href="#testResults"]';
+                    
+                    // wait for tabs animation (if needed)
+                    setTimeout(() => {
+                        this.testResults(testResult.ItemsByPartition.map(x => new partitionTable(x)));
+                    }, 300);
                     this.debugOutput(testResult.DebugOutput);
                     this.transformationErrors(testResult.TransformationErrors);
 
                     if (this.warningsCount()) {
                         $('.test-container a[href="#warnings"]').tab('show');
                     } else {
-                        $('.test-container a[href="#testResults"]').tab('show');
+                        $($testResults).tab('show');
                     }
-
+                    
                     this.testAlreadyExecuted(true);
                 })
                 .always(() => this.spinners.test(false));
@@ -212,6 +218,12 @@ class olapTaskTestMode {
 }
 
 class editOlapEtlTask extends viewModelBase {
+
+    view = require("views/database/tasks/editOlapEtlTask.html");
+    backupDestinationTestCredentialsView = require("views/partial/backupDestinationTestCredentialsResults.html");
+    connectionStringOlapView = require("views/database/settings/connectionStringOlap.html");
+    backupConfigurationView = require("views/partial/backupConfigurationScript.html");
+    backupDestinationLocalView = require("views/partial/backupDestinationLocal.html");
 
     static readonly scriptNamePrefix = "Script_";
     enableTestArea = ko.observable<boolean>(false);

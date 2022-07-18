@@ -2,6 +2,7 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using Sparrow.Collections;
@@ -11,6 +12,7 @@ using Sparrow.Platform.Posix;
 using Sparrow.Platform.Posix.macOS;
 using Sparrow.Server.Utils;
 using Sparrow.Utils;
+using NativeMemory = Sparrow.Utils.NativeMemory;
 
 namespace Sparrow.LowMemory
 {
@@ -189,10 +191,12 @@ namespace Sparrow.LowMemory
         private static void ThrowInsufficientMemory(MemoryInfoResult memInfo)
         {
             LowMemoryNotification.Instance.SimulateLowMemoryNotification();
-            throw new EarlyOutOfMemoryException($"The amount of available memory to commit on the system is low. Commit charge: {memInfo.CurrentCommitCharge} / {memInfo.TotalCommittableMemory}. Memory: {memInfo.TotalPhysicalMemory - memInfo.AvailableMemory} / {memInfo.TotalPhysicalMemory}", memInfo);
+
+            throw new EarlyOutOfMemoryException($"The amount of available memory to commit on the system is low. " +
+                                                MemoryUtils.GetExtendedMemoryInfo(memInfo), memInfo);
+
         }
-        
-        
+
         public enum JOBOBJECTINFOCLASS
         {
             AssociateCompletionPortInformation = 7,
@@ -650,7 +654,19 @@ namespace Sparrow.LowMemory
 
                 if (maxSize != long.MaxValue)
                 {
-                    long workingSet64 = Process.GetCurrentProcess().WorkingSet64;
+                    long workingSet64;
+                    if (process == null)
+                    {
+                        using (var p = Process.GetCurrentProcess())
+                        {
+                            workingSet64 = p.WorkingSet64;
+                        }
+                    }
+                    else
+                    {
+                        workingSet64 = process.WorkingSet64;
+                    }
+
                     availableMemoryForProcessingInBytes = Math.Max(maxSize - workingSet64, 0);
                     availPageFile = Math.Max(maxSize - workingSet64, 0);
                     totalPageFile = maxSize;

@@ -48,8 +48,8 @@ namespace SlowTests.Client.Attachments
             using (var store1 = GetDocumentStore())
             using (var store2 = GetDocumentStore())
             {
-                await SetDatabaseId(store1, dbId1);
-                await SetDatabaseId(store2, dbId2);
+                await Databases.SetDatabaseId(store1, dbId1);
+                await Databases.SetDatabaseId(store2, dbId2);
 
                 using (var session = store1.OpenSession())
                 {
@@ -178,7 +178,7 @@ namespace SlowTests.Client.Attachments
         }
 
         [Theory]
-        [InlineData("\t", null)]
+        [InlineData("\r\n", null)]
         [InlineData("\\", "\\")]
         [InlineData("/", "/")]
         [InlineData("5", "5")]
@@ -192,7 +192,7 @@ namespace SlowTests.Client.Attachments
             using (var store2 = GetDocumentStore())
             {
                 var dbId1 = new Guid("00000000-48c4-421e-9466-000000000000");
-                await SetDatabaseId(store1, dbId1);
+                await Databases.SetDatabaseId(store1, dbId1);
 
                 using (var session = store1.OpenSession())
                 {
@@ -244,8 +244,8 @@ namespace SlowTests.Client.Attachments
             {
                 var dbId1 = new Guid("00000000-48c4-421e-9466-000000000000");
                 var dbId2 = new Guid("99999999-48c4-421e-9466-999999999999");
-                await SetDatabaseId(store1, dbId1);
-                await SetDatabaseId(store2, dbId2);
+                await Databases.SetDatabaseId(store1, dbId1);
+                await Databases.SetDatabaseId(store2, dbId2);
 
                 using (var session = store1.OpenSession())
                 {
@@ -332,7 +332,7 @@ namespace SlowTests.Client.Attachments
             using (var store2 = GetDocumentStore())
             {
                 var dbId1 = new Guid("00000000-48c4-421e-9466-000000000000");
-                await SetDatabaseId(store1, dbId1);
+                await Databases.SetDatabaseId(store1, dbId1);
 
                 for (int i = 1; i <= 3; i++)
                 {
@@ -350,6 +350,7 @@ namespace SlowTests.Client.Attachments
                     store1.Operations.Send(new PutAttachmentOperation("users/1", "big-file", stream2, "image/png"));
 
                 await SetupAttachmentReplicationAsync(store1, store2);
+                WaitForUserToContinueTheTest(store2);
                 AssertAttachmentCount(store2, 2, 4);
 
                 using (var session = store2.OpenSession())
@@ -476,13 +477,222 @@ namespace SlowTests.Client.Attachments
         }
 
         [Fact]
+        public async Task AttachmentsRevisionsReplicationAfterEnable()
+        {
+            using (var store1 = GetDocumentStore())
+            using (var store2 = GetDocumentStore())
+            {
+                using (var session = store1.OpenSession())
+                {
+                    session.Store(new User { Name = "Fitzchak" }, "users/1");
+                    session.SaveChanges();
+                }
+
+                var names = new[] { "profile.png", "background-photo.jpg", "fileNAME_#$1^%_בעברית.txt" };
+
+                using (var profileStream = new MemoryStream(new byte[] { 1, 2, 3 }))
+                using (var backgroundStream = new MemoryStream(new byte[] { 10, 20, 30, 40, 50 }))
+                using (var fileStream = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 }))
+                {
+                    var result = store1.Operations.Send(new PutAttachmentOperation("users/1", names[0], profileStream, "image/png"));
+                    Assert.Equal("EcDnm3HDl2zNDALRMQ4lFsCO3J2Lb1fM1oDWOk2Octo=", result.Hash);
+
+                    result = store1.Operations.Send(new PutAttachmentOperation("users/1", names[1], backgroundStream, "ImGgE/jPeG"));
+                    Assert.Equal("igkD5aEdkdAsAB/VpYm1uFlfZIP9M2LSUsD6f6RVW9U=", result.Hash);
+
+                    result = store1.Operations.Send(new PutAttachmentOperation("users/1", names[2], fileStream, null));
+                    Assert.Equal("Arg5SgIJzdjSTeY6LYtQHlyNiTPmvBLHbr/Cypggeco=", result.Hash);
+                }
+
+                await RevisionsHelper.SetupRevisions(Server.ServerStore, store1.Database, modifyConfiguration: configuration =>
+                {
+                    configuration.Collections["Users"].PurgeOnDelete = false;
+                    configuration.Collections["Users"].MinimumRevisionsToKeep = 4;
+                });
+                await RevisionsHelper.SetupRevisions(Server.ServerStore, store2.Database, configuration =>
+                {
+                    configuration.Collections["Users"].PurgeOnDelete = false;
+                    configuration.Collections["Users"].MinimumRevisionsToKeep = 4;
+                });
+
+                await SetupAttachmentReplicationAsync(store1, store2);
+                await SetupAttachmentReplicationAsync(store2, store1);
+
+                var stats1 = await store1.Maintenance.SendAsync(new GetStatisticsOperation());
+                var stats2 = await store2.Maintenance.SendAsync(new GetStatisticsOperation());
+
+                Assert.Equal(stats1.CountOfDocuments, stats2.CountOfDocuments);
+                Assert.Equal(stats1.CountOfRevisionDocuments, stats2.CountOfRevisionDocuments);
+                Assert.Equal(stats1.CountOfAttachments, stats2.CountOfAttachments);
+                Assert.Equal(stats1.CountOfUniqueAttachments, stats2.CountOfUniqueAttachments);
+
+                using (var session = store1.OpenSession())
+                {
+                    var u = session.Load<User>("users/1");
+                    u.Age = 30;
+                    session.SaveChanges();
+                }
+
+                WaitForMarker(store1, store2);
+                WaitForMarker(store2, store1);
+
+                stats1 = await store1.Maintenance.SendAsync(new GetStatisticsOperation());
+                stats2 = await store2.Maintenance.SendAsync(new GetStatisticsOperation());
+
+                Assert.Equal(stats1.CountOfDocuments, stats2.CountOfDocuments);
+                Assert.Equal(stats1.CountOfRevisionDocuments, stats2.CountOfRevisionDocuments);
+                Assert.Equal(stats1.CountOfAttachments, stats2.CountOfAttachments);
+                Assert.Equal(stats1.CountOfUniqueAttachments, stats2.CountOfUniqueAttachments);
+
+                using (var session = store1.OpenSession())
+                {
+                    var u = session.Load<User>("users/1");
+                    u.Age = 40;
+                    session.SaveChanges();
+                }
+
+                using (var session = store1.OpenSession())
+                {
+                    var u = session.Load<User>("users/1");
+                    u.Age = 50;
+                    session.SaveChanges();
+                }
+
+                using (var session = store1.OpenSession())
+                {
+                    var u = session.Load<User>("users/1");
+                    u.Age = 60;
+                    session.SaveChanges();
+                }
+
+                WaitForMarker(store1, store2);
+                WaitForMarker(store2, store1);
+
+                stats1 = await store1.Maintenance.SendAsync(new GetStatisticsOperation());
+                stats2 = await store2.Maintenance.SendAsync(new GetStatisticsOperation());
+
+                Assert.Equal(stats1.CountOfDocuments, stats2.CountOfDocuments);
+                Assert.Equal(stats1.CountOfRevisionDocuments, stats2.CountOfRevisionDocuments);
+                Assert.Equal(stats1.CountOfAttachments, stats2.CountOfAttachments);
+                Assert.Equal(stats1.CountOfUniqueAttachments, stats2.CountOfUniqueAttachments);
+            }
+        }
+
+        [Fact]
+        public async Task AttachmentsRevisionsReplicationAfterEnable2()
+        {
+            using (var store1 = GetDocumentStore())
+            using (var store2 = GetDocumentStore())
+            {
+                using (var session = store1.OpenSession())
+                {
+                    session.Store(new User { Name = "Fitzchak" }, "users/1");
+                    session.SaveChanges();
+                }
+
+                using (var profileStream = new MemoryStream(new byte[] { 1, 2, 3 }))
+                {
+                    var result = store1.Operations.Send(new PutAttachmentOperation("users/1", "foo", profileStream, "image/png"));
+                    Assert.Equal("EcDnm3HDl2zNDALRMQ4lFsCO3J2Lb1fM1oDWOk2Octo=", result.Hash);
+                }
+
+                await RevisionsHelper.SetupRevisions(Server.ServerStore, store1.Database, modifyConfiguration: configuration =>
+                {
+                    configuration.Collections["Users"].PurgeOnDelete = false;
+                    configuration.Collections["Users"].MinimumRevisionsToKeep = 4;
+                });
+                await RevisionsHelper.SetupRevisions(Server.ServerStore, store2.Database, configuration =>
+                {
+                    configuration.Collections["Users"].PurgeOnDelete = false;
+                    configuration.Collections["Users"].MinimumRevisionsToKeep = 4;
+                });
+
+
+                using (var backgroundStream = new MemoryStream(new byte[] { 10, 20, 30, 40, 50 }))
+                {
+                    var result = store1.Operations.Send(new PutAttachmentOperation("users/1", "foo", backgroundStream, "ImGgE/jPeG"));
+                    Assert.Equal("igkD5aEdkdAsAB/VpYm1uFlfZIP9M2LSUsD6f6RVW9U=", result.Hash);
+                }
+
+                await SetupAttachmentReplicationAsync(store1, store2);
+                await SetupAttachmentReplicationAsync(store2, store1);
+
+                var stats1 = await store1.Maintenance.SendAsync(new GetStatisticsOperation());
+                var stats2 = await store2.Maintenance.SendAsync(new GetStatisticsOperation());
+
+                Assert.Equal(stats1.CountOfDocuments, stats2.CountOfDocuments);
+                Assert.Equal(stats1.CountOfRevisionDocuments, stats2.CountOfRevisionDocuments);
+                Assert.Equal(stats1.CountOfAttachments, stats2.CountOfAttachments);
+                Assert.Equal(stats1.CountOfUniqueAttachments, stats2.CountOfUniqueAttachments);
+
+                using (var session = store1.OpenSession())
+                {
+                    var u = session.Load<User>("users/1");
+                    u.Age = 30;
+                    session.SaveChanges();
+                }
+
+                WaitForMarker(store1, store2);
+                WaitForMarker(store2, store1);
+
+                stats1 = await store1.Maintenance.SendAsync(new GetStatisticsOperation());
+                stats2 = await store2.Maintenance.SendAsync(new GetStatisticsOperation());
+
+                Assert.Equal(stats1.CountOfDocuments, stats2.CountOfDocuments);
+                Assert.Equal(stats1.CountOfRevisionDocuments, stats2.CountOfRevisionDocuments);
+                Assert.Equal(stats1.CountOfAttachments, stats2.CountOfAttachments);
+                Assert.Equal(stats1.CountOfUniqueAttachments, stats2.CountOfUniqueAttachments);
+
+                using (var session = store1.OpenSession())
+                {
+                    var u = session.Load<User>("users/1");
+                    u.Age = 40;
+                    session.SaveChanges();
+                }
+
+
+                using (var fileStream = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 }))
+                {
+                    var result = store1.Operations.Send(new PutAttachmentOperation("users/1", "bar", fileStream, null));
+                    Assert.Equal("Arg5SgIJzdjSTeY6LYtQHlyNiTPmvBLHbr/Cypggeco=", result.Hash);
+                }
+
+
+                using (var session = store1.OpenSession())
+                {
+                    var u = session.Load<User>("users/1");
+                    u.Age = 50;
+                    session.SaveChanges();
+                }
+
+                using (var session = store1.OpenSession())
+                {
+                    var u = session.Load<User>("users/1");
+                    u.Age = 60;
+                    session.SaveChanges();
+                }
+
+                WaitForMarker(store1, store2);
+                WaitForMarker(store2, store1);
+
+                stats1 = await store1.Maintenance.SendAsync(new GetStatisticsOperation());
+                stats2 = await store2.Maintenance.SendAsync(new GetStatisticsOperation());
+
+                Assert.Equal(stats1.CountOfDocuments, stats2.CountOfDocuments);
+                Assert.Equal(stats1.CountOfRevisionDocuments, stats2.CountOfRevisionDocuments);
+                Assert.Equal(stats1.CountOfAttachments, stats2.CountOfAttachments);
+                Assert.Equal(stats1.CountOfUniqueAttachments, stats2.CountOfUniqueAttachments);
+            }
+        }
+
+        [Fact]
         public async Task AttachmentsRevisionsReplication()
         {
             using (var store1 = GetDocumentStore())
             using (var store2 = GetDocumentStore())
             {
                 var dbId1 = new Guid("00000000-48c4-421e-9466-000000000000");
-                await SetDatabaseId(store1, dbId1);
+                await Databases.SetDatabaseId(store1, dbId1);
 
                 await RevisionsHelper.SetupRevisions(Server.ServerStore, store1.Database, modifyConfiguration: configuration =>
                 {
@@ -780,8 +990,8 @@ namespace SlowTests.Client.Attachments
             using (var store1 = GetDocumentStore())
             using (var store2 = GetDocumentStore())
             {
-                await SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
-                await SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
+                await Databases.SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
+                await Databases.SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
 
                 using (var session = store1.OpenAsyncSession())
                 {
@@ -892,8 +1102,8 @@ namespace SlowTests.Client.Attachments
                 }
             }))
             {
-                await SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
-                await SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
+                await Databases.SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
+                await Databases.SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
 
                 using (var session = store1.OpenAsyncSession())
                 {
@@ -984,8 +1194,8 @@ namespace SlowTests.Client.Attachments
                 }
             }))
             {
-                await SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
-                await SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
+                await Databases.SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
+                await Databases.SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
 
                 using (var session = store1.OpenAsyncSession())
                 {
@@ -1057,8 +1267,8 @@ namespace SlowTests.Client.Attachments
             using (var store1 = GetDocumentStore())
             using (var store2 = GetDocumentStore())
             {
-                await SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
-                await SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
+                await Databases.SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
+                await Databases.SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
 
                 using (var session = store1.OpenAsyncSession())
                 {
@@ -1105,8 +1315,8 @@ namespace SlowTests.Client.Attachments
             using (var store1 = GetDocumentStore())
             using (var store2 = GetDocumentStore())
             {
-                await SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
-                await SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
+                await Databases.SetDatabaseId(store1, new Guid("00000000-48c4-421e-9466-000000000000"));
+                await Databases.SetDatabaseId(store2, new Guid("99999999-48c4-421e-9466-999999999999"));
 
                 using (var session = store1.OpenAsyncSession())
                 {
@@ -1223,7 +1433,7 @@ namespace SlowTests.Client.Attachments
                     }, 1);
                     Assert.Equal(1, count);
                 }
-                
+
             }
         }
 
@@ -1233,13 +1443,13 @@ namespace SlowTests.Client.Attachments
             using (var store1 = GetDocumentStore())
             using (var store2 = GetDocumentStore())
             {
-                var database1 = await GetDocumentDatabaseInstanceFor(store1);
+                var database1 = await Databases.GetDocumentDatabaseInstanceFor(store1);
                 using (var controller = new ReplicationController(database1))
                 {
                     using (var session = store1.OpenAsyncSession())
                     {
-                        await session.StoreAsync(new User {Name = "Karmel"}, "users/1");
-                        using (var a1 = new MemoryStream(new byte[] {1, 2, 3}))
+                        await session.StoreAsync(new User { Name = "Karmel" }, "users/1");
+                        using (var a1 = new MemoryStream(new byte[] { 1, 2, 3 }))
                         {
                             session.Advanced.Attachments.Store("users/1", "a1", a1, "a1/png");
                             await session.SaveChangesAsync();
@@ -1248,8 +1458,8 @@ namespace SlowTests.Client.Attachments
 
                     using (var session = store1.OpenAsyncSession())
                     {
-                        await session.StoreAsync(new User {Name = "Karmel"}, "users/2");
-                        using (var a1 = new MemoryStream(new byte[] {1, 2, 3, 4}))
+                        await session.StoreAsync(new User { Name = "Karmel" }, "users/2");
+                        using (var a1 = new MemoryStream(new byte[] { 1, 2, 3, 4 }))
                         {
                             session.Advanced.Attachments.Store("users/2", "a2", a1, "a2/png");
                             await session.SaveChangesAsync();
@@ -1305,7 +1515,7 @@ namespace SlowTests.Client.Attachments
                 Server = mainServer,
                 ModifyDatabaseName = s => databaseName,
                 ReplicationFactor = 3,
-                ModifyDocumentStore = s=>s.Conventions = new DocumentConventions
+                ModifyDocumentStore = s => s.Conventions = new DocumentConventions
                 {
                     DisableTopologyUpdates = true
                 }
@@ -1317,7 +1527,7 @@ namespace SlowTests.Client.Attachments
                 CreateDatabase = false
             }))
             {
-                await using (var ms = new MemoryStream(new byte[]{1,2,3,4}))
+                await using (var ms = new MemoryStream(new byte[] { 1, 2, 3, 4 }))
                 using (var session = store.OpenAsyncSession())
                 {
                     session.Advanced.WaitForReplicationAfterSaveChanges(replicas: 2);
@@ -1327,7 +1537,7 @@ namespace SlowTests.Client.Attachments
                     await session.SaveChangesAsync();
                 }
 
-                await using (var ms = new MemoryStream(new byte[]{1,2,3,4,5}))
+                await using (var ms = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 }))
                 using (var session = store.OpenAsyncSession())
                 {
                     session.Advanced.WaitForReplicationAfterSaveChanges(replicas: 2);
@@ -1350,8 +1560,12 @@ namespace SlowTests.Client.Attachments
                     EnsureNoReplicationLoop(cluster.Nodes[1], databaseName),
                     EnsureNoReplicationLoop(cluster.Nodes[2], databaseName)
                 };
+
                 await Task.WhenAll(tasks);
-                tasks.ForEach(t => t.Wait());
+                foreach (var task in tasks)
+                {
+                    await task;
+                }
 
                 var result = await store.Maintenance.Server.SendAsync(new DeleteDatabasesOperation(databaseName, hardDelete: true, fromNode: toRemove, timeToWaitForConfirmation: TimeSpan.FromSeconds(60)));
                 await mainServer.ServerStore.Cluster.WaitForIndexNotification(result.RaftCommandIndex + 1);
@@ -1366,7 +1580,7 @@ namespace SlowTests.Client.Attachments
 
                 await store.Maintenance.Server.SendAsync(new AddDatabaseNodeOperation(databaseName, toRemove));
 
-                Assert.True(await WaitForDocumentInClusterAsync<Core.Utils.Entities.User>(new DatabaseTopology {Members = new List<string> {"A", "B", "C"}}, databaseName, "users/1", null,
+                Assert.True(await WaitForDocumentInClusterAsync<Core.Utils.Entities.User>(new DatabaseTopology { Members = new List<string> { "A", "B", "C" } }, databaseName, "users/1", null,
                     timeout: TimeSpan.FromSeconds(60)));
 
                 tasks = new List<Task>
@@ -1375,8 +1589,12 @@ namespace SlowTests.Client.Attachments
                     EnsureNoReplicationLoop(cluster.Nodes[1], databaseName),
                     EnsureNoReplicationLoop(cluster.Nodes[2], databaseName)
                 };
+
                 await Task.WhenAll(tasks);
-                tasks.ForEach(t => t.Wait());
+                foreach (var task in tasks)
+                {
+                    await task;
+                }
             }
         }
 
@@ -1572,7 +1790,10 @@ namespace SlowTests.Client.Attachments
                     await session.StoreAsync(new User { Name = "EGR" }, "users/1");
                     await session.SaveChangesAsync();
 
-                    await PutAttachment(store1, new byte[] { 1, 2, 3 }, "a1/jpeg");
+                    await using (var a1 = new MemoryStream(new byte[] { 1, 2, 3 }))
+                    {
+                        await store1.Operations.SendAsync(new PutAttachmentOperation("users/1", "a1", a1, "a1/jpeg"));
+                    }
                 }
 
                 using (var session = store2.OpenAsyncSession())
@@ -1580,16 +1801,20 @@ namespace SlowTests.Client.Attachments
                     await session.StoreAsync(new User { Name = "EGOR" }, "users/1");
                     await session.SaveChangesAsync();
 
-                    await PutAttachment(store2, new byte[] { 1, 2, 3 }, "a2/jpeg");
+                    await using (var a1 = new MemoryStream(new byte[] { 1, 2, 3 }))
+                    {
+                        store2.Operations.Send(new PutAttachmentOperation("users/1", "a1", a1, "a2/jpeg"));
+                    }
                 }
 
-                var replication1To2TaskId = (await SetupReplicationAsync(store1, store2)).First().TaskId;
-                var replication2To1TaskId = (await SetupReplicationAsync(store2, store1)).First().TaskId;
+                var externalList1 = await SetupReplicationAsync(store1, store2);
+                var externalList2 = await SetupReplicationAsync(store2, store1);
+                WaitForDocumentWithAttachmentToReplicate<User>(store1, "users/1", "a1", Debugger.IsAttached ? 60000 : 15000);
+                WaitForDocumentWithAttachmentToReplicate<User>(store2, "users/1", "a1", Debugger.IsAttached ? 60000 : 15000);
                 WaitForMarker(store1, store2);
 
-                static async Task Assert1(IDocumentStore store)
+                using (var session = store1.OpenAsyncSession())
                 {
-                    using var session = store.OpenAsyncSession();
                     var user = await session.LoadAsync<User>("users/1");
                     Assert.Equal("EGOR", user.Name);
                     var attachments = session.Advanced.Attachments.GetNames(user);
@@ -1600,59 +1825,81 @@ namespace SlowTests.Client.Attachments
                     Assert.Equal(3, attachments[0].Size);
                 }
 
-                await Assert1(store1);
-                await Assert1(store2);
+                using (var session = store2.OpenAsyncSession())
+                {
+                    var user = await session.LoadAsync<User>("users/1");
+                    Assert.Equal("EGOR", user.Name);
+                    var attachments = session.Advanced.Attachments.GetNames(user);
+                    Assert.Equal(1, attachments.Length);
+                    Assert.Equal("a1", attachments[0].Name);
+                    Assert.Equal("EcDnm3HDl2zNDALRMQ4lFsCO3J2Lb1fM1oDWOk2Octo=", attachments[0].Hash);
+                    Assert.Equal("a2/jpeg", attachments[0].ContentType);
+                    Assert.Equal(3, attachments[0].Size);
+                }
 
-                var db1 = await GetDocumentDatabaseInstanceFor(store1);
-                var db2 = await GetDocumentDatabaseInstanceFor(store2);
+                var db1 = await Databases.GetDocumentDatabaseInstanceFor(store1);
+                var db2 = await Databases.GetDocumentDatabaseInstanceFor(store2);
                 var replicationConnection1 = db1.ReplicationLoader.OutgoingHandlers.First();
                 var replicationConnection2 = db2.ReplicationLoader.OutgoingHandlers.First();
 
                 var external1 = new ExternalReplication(store1.Database, $"ConnectionString-{store2.Identifier}")
                 {
-                    TaskId = replication1To2TaskId,
+                    TaskId = externalList1.First().TaskId,
                     Disabled = true
                 };
                 var external2 = new ExternalReplication(store2.Database, $"ConnectionString-{store1.Identifier}")
                 {
-                    TaskId = replication2To1TaskId,
+                    TaskId = externalList2.First().TaskId,
                     Disabled = true
                 };
+                var res1 = await store1.Maintenance.SendAsync(new UpdateExternalReplicationOperation(external1));
+                Assert.Equal(externalList1.First().TaskId, res1.TaskId);
+                var res2 = await store2.Maintenance.SendAsync(new UpdateExternalReplicationOperation(external2));
+                Assert.Equal(externalList2.First().TaskId, res2.TaskId);
 
-                async Task UpdateExternalReplicationAndWait(IDocumentStore store, ExternalReplication external, long taskId)
-                {
-                    var result = await store.Maintenance.SendAsync(new UpdateExternalReplicationOperation(external));
-                    Assert.Equal(taskId, result.TaskId);
-                    await db1.ServerStore.Cluster.WaitForIndexNotification(result.RaftCommandIndex);
-                    await db2.ServerStore.Cluster.WaitForIndexNotification(result.RaftCommandIndex);
-                }
-
-                await Task.WhenAll(
-                    UpdateExternalReplicationAndWait(store1, external1, replication1To2TaskId),
-                    UpdateExternalReplicationAndWait(store2, external2, replication2To1TaskId));
+                await db1.ServerStore.Cluster.WaitForIndexNotification(res1.RaftCommandIndex);
+                await db2.ServerStore.Cluster.WaitForIndexNotification(res1.RaftCommandIndex);
+                await db1.ServerStore.Cluster.WaitForIndexNotification(res2.RaftCommandIndex);
+                await db2.ServerStore.Cluster.WaitForIndexNotification(res2.RaftCommandIndex);
 
                 Assert.True(await WaitForValueAsync(() => replicationConnection1.IsConnectionDisposed, true));
                 Assert.True(await WaitForValueAsync(() => replicationConnection2.IsConnectionDisposed, true));
 
-                await PutAttachment(store1, new byte[] { 1, 2, 3, 4 }, "a1/jpeg");
-                await PutAttachment(store2, new byte[] { 1, 2, 3, 5 }, "a1/jpeg");
-
-                var replication1To2LastEtag = ReplicationLoader.GetExternalReplicationState(db1.ServerStore, db1.Name, replication1To2TaskId).LastSentEtag;
-                var replication2To1LastEtag = ReplicationLoader.GetExternalReplicationState(db2.ServerStore, db2.Name, replication2To1TaskId).LastSentEtag;
-
+                await using (var a1 = new MemoryStream(new byte[] { 1, 2, 3, 4 }))
+                {
+                    await store1.Operations.SendAsync(new PutAttachmentOperation("users/1", "a1", a1, "a1/jpeg"));
+                }
+                await using (var a1 = new MemoryStream(new byte[] { 1, 2, 3, 5 }))
+                {
+                    await store2.Operations.SendAsync(new PutAttachmentOperation("users/1", "a1", a1, "a1/jpeg"));
+                }
                 external1.Disabled = false;
                 external2.Disabled = false;
 
-                await Task.WhenAll(
-                    UpdateExternalReplicationAndWait(store1, external1, replication1To2TaskId),
-                    UpdateExternalReplicationAndWait(store2, external2, replication2To1TaskId));
+                var res3 = await store1.Maintenance.SendAsync(new UpdateExternalReplicationOperation(external1));
+                Assert.Equal(externalList1.First().TaskId, res3.TaskId);
+                var res4 = await store2.Maintenance.SendAsync(new UpdateExternalReplicationOperation(external2));
+                Assert.Equal(externalList2.First().TaskId, res4.TaskId);
 
-                await AssertWaitFoGreaterAsync(() => ReplicationLoader.GetExternalReplicationState(db1.ServerStore, db1.Name, replication1To2TaskId).LastSentEtag, replication1To2LastEtag);
-                await AssertWaitFoGreaterAsync(() => ReplicationLoader.GetExternalReplicationState(db2.ServerStore, db2.Name, replication2To1TaskId).LastSentEtag, replication2To1LastEtag);
+                await db1.ServerStore.Cluster.WaitForIndexNotification(res3.RaftCommandIndex);
+                await db2.ServerStore.Cluster.WaitForIndexNotification(res3.RaftCommandIndex);
+                await db1.ServerStore.Cluster.WaitForIndexNotification(res4.RaftCommandIndex);
+                await db2.ServerStore.Cluster.WaitForIndexNotification(res4.RaftCommandIndex);
 
-                static async Task Assert2(IDocumentStore store)
+                WaitForDocumentWithSpecificAttachmentInfoToReplicate<User>(store1, "users/1", "a1", CheckAttachment, Debugger.IsAttached ? 60000 : 15000);
+                WaitForDocumentWithSpecificAttachmentInfoToReplicate<User>(store2, "users/1", "a1", CheckAttachment, Debugger.IsAttached ? 60000 : 15000);
+
+                static bool CheckAttachment(AttachmentDetails att)
                 {
-                    using var session = store.OpenAsyncSession();
+                    if (att.Hash == "XiUNwy+pPQdTVBunU26rVydiLOd3Iqgtz4lkmZVfSs4=" && att.ContentType == "a1/jpeg")
+                        return true;
+                    return false;
+                }
+
+                WaitForMarker(store1, store2);
+
+                using (var session = store1.OpenAsyncSession())
+                {
                     var user = await session.LoadAsync<User>("users/1");
                     Assert.Equal("EGOR", user.Name);
                     var attachments = session.Advanced.Attachments.GetNames(user);
@@ -1663,12 +1910,16 @@ namespace SlowTests.Client.Attachments
                     Assert.Equal(4, attachments[0].Size);
                 }
 
-                await Assert2(store1);
-                await Assert2(store2);
-
-                static async Task PutAttachment(IDocumentStore store, byte[] buffer, string contentTyp)
+                using (var session = store2.OpenAsyncSession())
                 {
-                    await store.Operations.SendAsync(new PutAttachmentOperation("users/1", "a1", new MemoryStream(buffer), contentTyp));
+                    var user = await session.LoadAsync<User>("users/1");
+                    Assert.Equal("EGOR", user.Name);
+                    var attachments = session.Advanced.Attachments.GetNames(user);
+                    Assert.Equal(1, attachments.Length);
+                    Assert.Equal("a1", attachments[0].Name);
+                    Assert.Equal("XiUNwy+pPQdTVBunU26rVydiLOd3Iqgtz4lkmZVfSs4=", attachments[0].Hash);
+                    Assert.Equal("a1/jpeg", attachments[0].ContentType);
+                    Assert.Equal(4, attachments[0].Size);
                 }
             }
         }
@@ -1740,7 +1991,7 @@ namespace SlowTests.Client.Attachments
 
                 using (var session = store2.OpenAsyncSession())
                 {
-                    var u = new User {Name = "EGOR"};
+                    var u = new User { Name = "EGOR" };
                     await session.StoreAsync(u, "users/1");
                     await session.SaveChangesAsync();
 
@@ -1994,7 +2245,7 @@ namespace SlowTests.Client.Attachments
                 var cvs = new List<(string, string, string)>();
                 using (var session = store1.OpenAsyncSession())
                 {
-                    var u = new User {Name = "EGR"};
+                    var u = new User { Name = "EGR" };
                     await session.StoreAsync(u, "users/1");
                     await session.SaveChangesAsync();
 
@@ -2012,7 +2263,7 @@ namespace SlowTests.Client.Attachments
 
                 using (var session = store2.OpenAsyncSession())
                 {
-                    var u = new User {Name = "EGOR"};
+                    var u = new User { Name = "EGOR" };
                     await session.StoreAsync(u, "users/1");
                     await session.SaveChangesAsync();
 
@@ -2194,7 +2445,7 @@ namespace SlowTests.Client.Attachments
 
                 using (var session = store2.OpenAsyncSession())
                 {
-                    var u = new User {Name = "EGR"};
+                    var u = new User { Name = "EGR" };
                     await session.StoreAsync(u, "users/1");
                     await session.SaveChangesAsync();
 

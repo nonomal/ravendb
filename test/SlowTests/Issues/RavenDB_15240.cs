@@ -35,15 +35,15 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var database = await GetDocumentDatabaseInstanceFor(store);
+                var database = await Databases.GetDocumentDatabaseInstanceFor(store);
 
                 var tombstoneCleaner = database.TombstoneCleaner;
                 var state = tombstoneCleaner.GetState();
 
                 Assert.Equal(0, state["Companies"].Documents.Etag);
-                Assert.Equal(3, state["Companies"].TimeSeries.Etag);
+                Assert.Equal(2, state["Companies"].TimeSeries.Etag);
 
                 using (var session = store.OpenSession())
                 {
@@ -54,12 +54,12 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 state = tombstoneCleaner.GetState();
 
                 Assert.Equal(0, state["Companies"].Documents.Etag);
-                Assert.Equal(10, state["Companies"].TimeSeries.Etag);
+                Assert.Equal(8, state["Companies"].TimeSeries.Etag);
 
                 using (var session = store.OpenSession())
                 {
@@ -70,12 +70,12 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 state = tombstoneCleaner.GetState();
 
-                Assert.Equal(12, state["Companies"].Documents.Etag);
-                Assert.Equal(10, state["Companies"].TimeSeries.Etag);
+                Assert.Equal(10, state["Companies"].Documents.Etag);
+                Assert.Equal(8, state["Companies"].TimeSeries.Etag);
             }
         }
 

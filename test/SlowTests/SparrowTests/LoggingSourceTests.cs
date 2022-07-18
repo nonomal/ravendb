@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FastTests;
+using Raven.Client.Extensions;
 using Sparrow;
 using Sparrow.Logging;
 using Voron.Global;
@@ -326,7 +327,7 @@ namespace SlowTests.SparrowTests
             {
                 for (var j = 0; j < 5; j++)
                 {
-                    await logger.OperationsWithWait("Some message");
+                    await logger.OperationsWithWait($"compressing = {compressing}");
                 }
                 Thread.Sleep(10);
             }
@@ -344,16 +345,17 @@ namespace SlowTests.SparrowTests
 
                 return Math.Abs(size - retentionSize) <= threshold;
             }, true, 10_000, 1_000);
+
+            loggingSource.EndLogging();
+
             string errorMessage = isRetentionPolicyApplied 
                 ? string.Empty
                 : $"{TempInfoToInvestigate(loggingSource, path)}. " +
-                  $"ActualSize({size}), retentionSize({retentionSize}), threshold({threshold})" + 
+                  $"ActualSize({size}), retentionSize({retentionSize}), threshold({threshold}), path({path})" +
                   Environment.NewLine + 
                   FileNamesWithSize(afterEndFiles);
 
             Assert.True(isRetentionPolicyApplied, errorMessage);
-
-            loggingSource.EndLogging();
         }
 
         private static string FileNamesWithSize(FileInfo[] files)
@@ -513,8 +515,7 @@ namespace SlowTests.SparrowTests
                     for (var i = 0; i < 100; i++)
                     {
                         var task = secondLogger.OperationsWithWait("Some message");
-                        Task.WhenAny(task, Task.Delay(taskTimeout)).GetAwaiter().GetResult();
-                        if (task.IsCompleted == false)
+                        if (task.WaitWithTimeout(TimeSpan.FromMilliseconds(taskTimeout)).GetAwaiter().GetResult() == false)
                             throw new TimeoutException($"The log task took more then one second");
                     }
                 }
@@ -568,7 +569,7 @@ namespace SlowTests.SparrowTests
 
             var logger = new Logger(loggingSource, "Source" + name, "Logger" + name);
             var tcs = new TaskCompletionSource<WebSocketReceiveResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var socket = new DummyWebSocket();
+            var socket = new MyDummyWebSocket();
             socket.ReceiveAsyncFunc = () => tcs.Task;
             var context = new LoggingSource.WebSocketContext();
 
@@ -712,7 +713,7 @@ namespace SlowTests.SparrowTests
 
             var logger = new Logger(loggingSource, "Source" + name, "Logger" + name);
             var tcs = new TaskCompletionSource<WebSocketReceiveResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var socket = new DummyWebSocket();
+            var socket = new MyDummyWebSocket();
             socket.ReceiveAsyncFunc = () => tcs.Task;
             var context = new LoggingSource.WebSocketContext();
 
@@ -738,7 +739,7 @@ namespace SlowTests.SparrowTests
             Assert.DoesNotContain(uniqForInformation, logContent);
         }
 
-        private class DummyWebSocket : WebSocket
+        private class MyDummyWebSocket : WebSocket
         {
             private bool _close;
             public string LogsReceived { get; private set; } = "";

@@ -31,7 +31,7 @@ import notificationCenter = require("common/notifications/notificationCenter");
 import getClientBuildVersionCommand = require("commands/database/studio/getClientBuildVersionCommand");
 import getServerBuildVersionCommand = require("commands/resources/getServerBuildVersionCommand");
 import getGlobalStudioConfigurationCommand = require("commands/resources/getGlobalStudioConfigurationCommand");
-import getStudioConfigurationCommand = require("commands/resources/getStudioConfigurationCommand");
+import getDatabaseStudioConfigurationCommand = require("commands/resources/getDatabaseStudioConfigurationCommand");
 import viewModelBase = require("viewmodels/viewModelBase");
 import eventsCollector = require("common/eventsCollector");
 import collectionsTracker = require("common/helpers/database/collectionsTracker");
@@ -49,16 +49,25 @@ import clientCertificateModel = require("models/auth/clientCertificateModel");
 import certificateModel = require("models/auth/certificateModel");
 import serverTime = require("common/helpers/database/serverTime");
 import saveGlobalStudioConfigurationCommand = require("commands/resources/saveGlobalStudioConfigurationCommand");
-import saveStudioConfigurationCommand = require("commands/resources/saveStudioConfigurationCommand");
+import saveDatabaseStudioConfigurationCommand = require("commands/resources/saveDatabaseStudioConfigurationCommand");
 import studioSetting = require("common/settings/studioSetting");
 import detectBrowser = require("viewmodels/common/detectBrowser");
 import genUtils = require("common/generalUtils");
 import leafMenuItem = require("common/shell/menu/leafMenuItem");
+import connectionStatus from "models/resources/connectionStatus";
 
 class shell extends viewModelBase {
 
     private router = router;
+    view = require("views/shell.html");
+    usageStatsView = require("views/usageStats.html");
+    
+    notificationCenterView = require("views/notifications/notificationCenter.html");
+    graphHelperView = require("views/common/graphHelper.html");
+    
     static studioConfigDocumentId = "Raven/StudioConfig";
+    
+    static showConnectionLost = connectionStatus.showConnectionLost;
 
     notificationCenter = notificationCenter.instance;
     
@@ -110,19 +119,6 @@ class shell extends viewModelBase {
     
     private onBootstrapFinishedTask = $.Deferred<void>();
     
-    static showConnectionLost = ko.pureComputed(() => {
-        const serverWideWebSocket = changesContext.default.serverNotifications();
-        
-        if (!serverWideWebSocket) {
-            return false;
-        }
-        
-        const errorState = serverWideWebSocket.inErrorState();
-        const ignoreError = serverWideWebSocket.ignoreWebSocketConnectionError();
-        
-        return errorState && !ignoreError;
-    });
-
     constructor() {
         super();
 
@@ -149,9 +145,9 @@ class shell extends viewModelBase {
         activeDatabaseTracker.default.database.subscribe(newDatabase => footer.default.forDatabase(newDatabase));
 
         studioSettings.default.configureLoaders(() => new getGlobalStudioConfigurationCommand().execute(),
-            (db) => new getStudioConfigurationCommand(db).execute(),
+            (db) => new getDatabaseStudioConfigurationCommand(db).execute(),
             settings => new saveGlobalStudioConfigurationCommand(settings).execute(),
-            (settings, db) => new saveStudioConfigurationCommand(settings, db).execute()
+            (settings, db) => new saveDatabaseStudioConfigurationCommand(settings, db).execute()
         );
         
         this.browserAlert = new detectBrowser(true);
@@ -233,7 +229,7 @@ class shell extends viewModelBase {
                 // "http"
                 if (location.protocol === "http:") {
                     this.accessManager.securityClearance("ClusterAdmin");
-                    this.accessManager.unsecureServer(true);
+                    this.accessManager.secureServer(false);
                 } else {
                     // "https"
                     if (certificate) {
@@ -246,9 +242,11 @@ class shell extends viewModelBase {
                             databasesAccess[`${key}`] = `Database${access}` as databaseAccessLevel;
                         }
                         accessManager.databasesAccess = databasesAccess;
+                        this.accessManager.secureServer(true);
                         
                     } else {
                         this.accessManager.securityClearance("ValidUser");
+                        this.accessManager.secureServer(false);
                     }
                 }
             })
@@ -312,8 +310,9 @@ class shell extends viewModelBase {
             popoverUtils.longWithHover($(".js-client-cert"),
                 {
                     content: authenticationInfo,
-                    placement: 'top'
-                });
+                    placement: 'top',
+                    sanitize: false
+                } as PopoverOptions);
         }
         
         if (!this.clientCertificate()) {

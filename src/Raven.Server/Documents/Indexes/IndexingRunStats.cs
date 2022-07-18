@@ -14,6 +14,7 @@ namespace Raven.Server.Documents.Indexes
         public int MapReferenceAttempts;
         public int MapSuccesses;
         public int MapReferenceSuccesses;
+        public int TombstoneDeleteSuccesses;
         public int MapErrors;
         public int MapReferenceErrors;
 
@@ -32,6 +33,8 @@ namespace Raven.Server.Documents.Indexes
         public MapRunDetails MapDetails;
 
         public ReferenceRunDetails ReferenceDetails;
+
+        public CleanupRunDetails CleanupDetails;
 
         public StorageCommitDetails CommitDetails;
 
@@ -59,9 +62,9 @@ namespace Raven.Server.Documents.Indexes
             AddError(key, message, "MapReference");
         }
 
-        public void AddReduceError(string message)
+        public void AddReduceError(string message, string reduceKey)
         {
-            AddError(null, message, "Reduce");
+            AddError(reduceKey, message, "Reduce");
 
             NumberOfKeptReduceErrors++;
         }

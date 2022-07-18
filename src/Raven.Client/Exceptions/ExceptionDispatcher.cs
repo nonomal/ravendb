@@ -63,6 +63,17 @@ namespace Raven.Client.Exceptions
             return exception;
         }
 
+        public static Exception Get(BlittableJsonReaderObject json, HttpStatusCode code, Exception inner = null)
+        {
+            var schema = GetExceptionSchema(code, json);
+
+            var exception = Get(schema, code, inner);
+
+            FillException(exception, json);
+
+            return exception;
+        }
+
         public static async Task Throw(JsonOperationContext context, HttpResponseMessage response, Action<StringBuilder> additionalErrorInfo = null)
         {
             if (response == null)
@@ -71,7 +82,7 @@ namespace Raven.Client.Exceptions
             using (var stream = await RequestExecutor.ReadAsStreamUncompressedAsync(response).ConfigureAwait(false))
             using (var json = await GetJson(context, response, stream).ConfigureAwait(false))
             {
-                var schema = GetExceptionSchema(response, json);
+                var schema = GetExceptionSchema(response.StatusCode, json);
 
                 if (response.StatusCode == HttpStatusCode.Conflict)
                 {
@@ -107,16 +118,23 @@ namespace Raven.Client.Exceptions
                 if (typeof(RavenException).IsAssignableFrom(type) == false)
                     throw new RavenException(schema.Error, exception);
 
-                if (type == typeof(IndexCompilationException))
-                {
-                    var indexCompilationException = (IndexCompilationException)exception;
-                    json.TryGet(nameof(IndexCompilationException.IndexDefinitionProperty), out indexCompilationException.IndexDefinitionProperty);
-                    json.TryGet(nameof(IndexCompilationException.ProblematicText), out indexCompilationException.ProblematicText);
-
-                    throw indexCompilationException;
-                }
+                FillException(exception, json);
 
                 throw exception;
+            }
+        }
+
+        private static void FillException(Exception exception, BlittableJsonReaderObject json)
+        {
+            switch (exception)
+            {
+                case IndexCompilationException indexCompilationException:
+                    json.TryGet(nameof(IndexCompilationException.IndexDefinitionProperty), out indexCompilationException.IndexDefinitionProperty);
+                    json.TryGet(nameof(IndexCompilationException.ProblematicText), out indexCompilationException.ProblematicText);
+                    break;
+                case RavenTimeoutException timeoutException:
+                    json.TryGet(nameof(RavenTimeoutException.FailImmediately), out timeoutException.FailImmediately);
+                    break;
             }
         }
 
@@ -125,7 +143,58 @@ namespace Raven.Client.Exceptions
             if (schema.Type.Contains(nameof(DocumentConflictException))) // temporary!
                 throw DocumentConflictException.From(json);
 
-            throw new ConcurrencyException(schema.Message);
+            string expectedCv, actualCv, docId;
+            if (schema.Type.Contains(nameof(ClusterTransactionConcurrencyException)))
+            {
+                var ctxConcurrencyException = new ClusterTransactionConcurrencyException(schema.Message);
+
+                if (json.TryGet(nameof(ClusterTransactionConcurrencyException.Id), out docId))
+                    ctxConcurrencyException.Id = docId;
+
+                if (json.TryGet(nameof(ClusterTransactionConcurrencyException.ExpectedChangeVector), out expectedCv))
+                    ctxConcurrencyException.ExpectedChangeVector = expectedCv;
+
+                if (json.TryGet(nameof(ClusterTransactionConcurrencyException.ActualChangeVector), out actualCv))
+                    ctxConcurrencyException.ActualChangeVector = actualCv;
+
+                if (json.TryGet(nameof(ClusterTransactionConcurrencyException.ConcurrencyViolations), out BlittableJsonReaderArray violations) == false)
+                    throw ctxConcurrencyException;
+
+                ctxConcurrencyException.ConcurrencyViolations = new ClusterTransactionConcurrencyException.ConcurrencyViolation[violations.Length];
+
+                for (var i = 0; i < violations.Length; i++)
+                {
+                    if (!(violations[i] is BlittableJsonReaderObject violation))
+                        continue;
+
+                    var current = ctxConcurrencyException.ConcurrencyViolations[i] = new ClusterTransactionConcurrencyException.ConcurrencyViolation();
+
+                    if (violation.TryGet(nameof(ClusterTransactionConcurrencyException.ConcurrencyViolation.Id), out string id))
+                        current.Id = id;
+
+                    if (violation.TryGet(nameof(ClusterTransactionConcurrencyException.ConcurrencyViolation.Type), out ClusterTransactionConcurrencyException.ViolationOnType type))
+                        current.Type = type;
+
+                    if (violation.TryGet(nameof(ClusterTransactionConcurrencyException.ConcurrencyViolation.Expected), out long expected))
+                        current.Expected = expected;
+
+                    if (violation.TryGet(nameof(ClusterTransactionConcurrencyException.ConcurrencyViolation.Actual), out long actual))
+                        current.Actual = actual;
+                }
+
+                throw ctxConcurrencyException;
+            }
+
+            var concurrencyException = new ConcurrencyException(schema.Message);
+
+            if (json.TryGet(nameof(ConcurrencyException.Id), out docId))
+                concurrencyException.Id = docId;
+            if (json.TryGet(nameof(ConcurrencyException.ExpectedChangeVector), out expectedCv))
+                concurrencyException.ExpectedChangeVector = expectedCv;
+            if (json.TryGet(nameof(ConcurrencyException.ActualChangeVector), out actualCv))
+                concurrencyException.ActualChangeVector = actualCv;
+
+            throw concurrencyException;
         }
 
         public static Type GetType(string typeAsString)
@@ -133,7 +202,7 @@ namespace Raven.Client.Exceptions
             return Type.GetType(typeAsString, throwOnError: false);
         }
 
-        private static ExceptionSchema GetExceptionSchema(HttpResponseMessage response, BlittableJsonReaderObject json)
+        private static ExceptionSchema GetExceptionSchema(HttpStatusCode code, BlittableJsonReaderObject json)
         {
             ExceptionSchema schema;
             try
@@ -142,20 +211,20 @@ namespace Raven.Client.Exceptions
             }
             catch (Exception e)
             {
-                throw new InvalidOperationException($"Cannot deserialize the {response.StatusCode} response. JSON: {json}", e);
+                throw new InvalidOperationException($"Cannot deserialize the {code} response. JSON: {json}", e);
             }
 
             if (schema == null)
-                throw new BadResponseException($"After deserialization the {response.StatusCode} response is null. JSON: {json}");
+                throw new BadResponseException($"After deserialization the {code} response is null. JSON: {json}");
 
             if (schema.Message == null)
-                throw new BadResponseException($"After deserialization the {response.StatusCode} response property '{nameof(schema.Message)}' is null. JSON: {json}");
+                throw new BadResponseException($"After deserialization the {code} response property '{nameof(schema.Message)}' is null. JSON: {json}");
 
             if (schema.Error == null)
-                throw new BadResponseException($"After deserialization the {response.StatusCode} response property '{nameof(schema.Error)}' is null. JSON: {json}");
+                throw new BadResponseException($"After deserialization the {code} response property '{nameof(schema.Error)}' is null. JSON: {json}");
 
             if (schema.Type == null)
-                throw new BadResponseException($"After deserialization the {response.StatusCode} response property '{nameof(schema.Type)}' is null. JSON: {json}");
+                throw new BadResponseException($"After deserialization the {code} response property '{nameof(schema.Type)}' is null. JSON: {json}");
 
             return schema;
         }

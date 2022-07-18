@@ -11,6 +11,7 @@ using Raven.Server.Documents.Indexes.Analysis;
 using Raven.Server.Documents.Indexes.Configuration;
 using Raven.Server.Documents.Indexes.Persistence.Lucene;
 using Raven.Server.ServerWide;
+using Raven.Server.Utils.Features;
 using Sparrow;
 using Sparrow.LowMemory;
 using Sparrow.Platform;
@@ -30,6 +31,8 @@ namespace Raven.Server.Config.Categories
         {
             _root = root;
 
+            QueryClauseCacheDisabled = root.Core.FeaturesAvailability != FeaturesAvailability.Experimental;
+            QueryClauseCacheSize = PlatformDetails.Is32Bits ? new Size(32, SizeUnit.Megabytes) : (MemoryInformation.TotalPhysicalMemory / 10);
             MaximumSizePerSegment = new Size(PlatformDetails.Is32Bits ? 128 : 1024, SizeUnit.Megabytes);
             LargeSegmentSizeToMerge = new Size(PlatformDetails.Is32Bits ? 16 : 32, SizeUnit.Megabytes);
 
@@ -68,6 +71,7 @@ namespace Raven.Server.Config.Categories
             protected set => _runInMemory = value;
         }
 
+        [Description("Indicate if all indexes in the database are disabled")]
         [DefaultValue(false)]
         [IndexUpdateType(IndexUpdateType.None)]
         [ConfigurationEntry("Indexing.Disable", ConfigurationEntryScope.ServerWideOrPerDatabase)]
@@ -152,6 +156,40 @@ namespace Raven.Server.Config.Categories
         [ConfigurationEntry("Indexing.MapTimeoutInSec", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public TimeSetting MapTimeout { get; protected set; }
 
+        [Description("EXPERT: Maximum size that the query clause cache will utilize for caching partial query clasues, defaults to 10% of the system memory on 64 bits machines.")]
+        [DefaultValue(DefaultValueSetInConstructor)]
+        [SizeUnit((SizeUnit.Megabytes))]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
+        [ConfigurationEntry("Indexing.QueryClauseCache.SizeInMb", ConfigurationEntryScope.ServerWideOnly)]
+        public Size QueryClauseCacheSize { get; protected set; }
+        
+        [Description("EXPERT: Disable the query clause cache for a server, database or a single index.")]
+        [DefaultValue(DefaultValueSetInConstructor)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
+        [ConfigurationEntry("Indexing.QueryClauseCache.Disabled", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
+        public bool QueryClauseCacheDisabled { get; protected set; }
+
+        [Description("EXPERT: Frequency to scan the query clause cache for expired values")]
+        [DefaultValue(180)]
+        [TimeUnit(TimeUnit.Seconds)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
+        [ConfigurationEntry("Indexing.QueryClauseCache.ExpirationScanFrequencyInSec", ConfigurationEntryScope.ServerWideOnly)]
+        public TimeSetting QueryClauseCacheExpirationScanFrequency { get; protected set; }
+        
+        [Description("EXPERT: The number of recent queries that we'll keep to identify repeated queries (and thus, relevant for caching).")]
+        [DefaultValue(512)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
+        [ConfigurationEntry("Indexing.QueryClauseCache.RepeatedQueriesCount", ConfigurationEntryScope.ServerWideOnly)]
+        public int QueryClauseCacheRepeatedQueriesCount { get; protected set; }
+
+        
+        [Description("EXPERT: The time frame for a query to repeat itself for us to consider it worth caching.")]
+        [DefaultValue(300)]
+        [TimeUnit(TimeUnit.Seconds)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
+        [ConfigurationEntry("Indexing.QueryClauseCache.RepeatedQueriesTimeFrameInSec", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
+        public TimeSetting QueryClauseCacheRepeatedQueriesTimeFrame { get; protected set; }
+        
         [Description("Maximum number of mapped documents. Cannot be less than 128. By default 'null' - no limit.")]
         [DefaultValue(null)]
         [MinValue(128)]
@@ -279,10 +317,16 @@ namespace Raven.Server.Config.Categories
         public bool IndexEmptyEntries { get; set; }
 
         [Description("Indicates how error indexes should behave on database startup when they are loaded. By default they are not started.")]
-        [DefaultValue(IndexStartupBehavior.Default)]
+        [DefaultValue(ErrorIndexStartupBehaviorType.Default)]
         [IndexUpdateType(IndexUpdateType.None)]
         [ConfigurationEntry("Indexing.ErrorIndexStartupBehavior", ConfigurationEntryScope.ServerWideOrPerDatabase)]
-        public IndexStartupBehavior ErrorIndexStartupBehavior { get; set; }
+        public ErrorIndexStartupBehaviorType ErrorIndexStartupBehavior { get; set; }
+
+        [Description("Indicates how indexes should behave on database startup when they are loaded. By default they are started immediately.")]
+        [DefaultValue(IndexStartupBehaviorType.Default)]
+        [IndexUpdateType(IndexUpdateType.None)]
+        [ConfigurationEntry("Indexing.IndexStartupBehavior", ConfigurationEntryScope.ServerWideOrPerDatabase)]
+        public IndexStartupBehaviorType IndexStartupBehavior { get; set; }
 
         [Description("Limits the number of concurrently running and processing indexes on the server. Default: null (no limit)")]
         [DefaultValue(null)]
@@ -340,6 +384,25 @@ namespace Raven.Server.Config.Categories
 
         public Lazy<AnalyzerFactory> DefaultSearchAnalyzerType { get; private set; }
 
+        [Description("EXPERT: Allows to open an index without checking if current Database ID matched the one for which index was created.")]
+        [DefaultValue(false)]
+        [IndexUpdateType(IndexUpdateType.None)]
+        [ConfigurationEntry("Indexing.SkipDatabaseIdValidationOnIndexOpening", ConfigurationEntryScope.ServerWideOrPerDatabase)]
+        public bool SkipDatabaseIdValidationOnIndexOpening { get; set; }
+
+        [Description("Time since last query after which when cleanup is executed additional items will be released (e.g. readers).")]
+        [DefaultValue(10)]
+        [TimeUnit(TimeUnit.Minutes)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
+        [ConfigurationEntry("Indexing.TimeSinceLastQueryAfterWhichDeepCleanupCanBeExecutedInMin", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
+        public TimeSetting TimeSinceLastQueryAfterWhichDeepCleanupCanBeExecuted { get; set; }
+
+        [Description("Require database admin clearance to deploy JavaScript indexes")]
+        [DefaultValue(false)]
+        [IndexUpdateType(IndexUpdateType.None)]
+        [ConfigurationEntry("Indexing.Static.RequireAdminToDeployJavaScriptIndexes", ConfigurationEntryScope.ServerWideOrPerDatabase)]
+        public bool RequireAdminToDeployJavaScriptIndexes { get; set; }
+
         protected override void ValidateProperty(PropertyInfo property)
         {
             base.ValidateProperty(property);
@@ -363,11 +426,19 @@ namespace Raven.Server.Config.Categories
             DefaultSearchAnalyzerType = new Lazy<AnalyzerFactory>(() => IndexingExtensions.GetAnalyzerType("@default", DefaultSearchAnalyzer, resourceName));
         }
 
-        public enum IndexStartupBehavior
+        public enum ErrorIndexStartupBehaviorType
         {
             Default,
             Start,
             ResetAndStart
         }
+
+        public enum IndexStartupBehaviorType
+        {
+            Default,
+            Immediate,
+            Pause,
+            Delay
     }
+}
 }

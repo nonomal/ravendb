@@ -1,13 +1,15 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using FastTests;
 using FastTests.Graph;
 using Raven.Client.Documents;
 using Raven.Client.Exceptions;
 using Raven.Client.Exceptions.Database;
+using Raven.Client.Exceptions.Security;
 using Raven.Client.ServerWide;
 using Raven.Client.ServerWide.Operations;
+using Raven.Client.ServerWide.Operations.Certificates;
 using Raven.Server;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
@@ -22,14 +24,14 @@ namespace SlowTests.Issues
         public EncryptedDatabaseGroup(ITestOutputHelper output) : base(output)
         {
         }
-        
+
         [Fact]
         public async Task CanRemoveNodeWithNoKey()
         {
-             DebuggerAttachedTimeout.DisableLongTimespan = true;
+            DebuggerAttachedTimeout.DisableLongTimespan = true;
             var (nodes, leader, certificates) = await CreateRaftClusterWithSsl(3, watcherCluster: true);
 
-            EncryptedCluster(nodes, certificates, out var databaseName);
+            Encryption.EncryptedCluster(nodes, certificates, out var databaseName);
 
             var options = new Options
             {
@@ -47,17 +49,19 @@ namespace SlowTests.Issues
 
                 var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
                 var notInDbGroupServer = nodes.Single(s => record.Topology.AllNodes.Contains(s.ServerStore.NodeTag) == false);
-                DeleteSecretKeyForDatabaseFromServerStore(databaseName, notInDbGroupServer);
+                Encryption.DeleteSecretKeyForDatabaseFromServerStore(databaseName, notInDbGroupServer);
                 await Assert.ThrowsAsync<RavenException>(async () => await store.Maintenance.Server.SendAsync(new AddDatabaseNodeOperation(store.Database)));
+
+                await WaitForValueAsync(async () => (await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database))).Topology.Members.Count, 2);
 
                 record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
                 Assert.Empty(record.DeletionInProgress);
-                Assert.Equal(2 ,record.Topology.Members.Count);
-                Assert.Equal(1 ,record.Topology.Promotables.Count);
+                Assert.Equal(2, record.Topology.Members.Count);
+                Assert.Equal(1, record.Topology.Promotables.Count);
 
                 await DeleteNodeFromGroup(store, notInDbGroupServer);
 
-                var originalKey = CreateMasterKey(out _);
+                var originalKey = Encryption.CreateMasterKey(out _);
                 notInDbGroupServer.ServerStore.PutSecretKey(originalKey, databaseName, overwrite: false);
                 await AddNodeToGroup(store);
 
@@ -71,7 +75,7 @@ namespace SlowTests.Issues
             DebuggerAttachedTimeout.DisableLongTimespan = true;
             var (nodes, leader, certificates) = await CreateRaftClusterWithSsl(3, watcherCluster: true);
 
-            EncryptedCluster(nodes, certificates, out var databaseName);
+            Encryption.EncryptedCluster(nodes, certificates, out var databaseName);
 
             var options = new Options
             {
@@ -89,9 +93,9 @@ namespace SlowTests.Issues
 
                 var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
                 var notInDbGroupServer = nodes.Single(s => record.Topology.AllNodes.Contains(s.ServerStore.NodeTag) == false);
-                DeleteSecretKeyForDatabaseFromServerStore(databaseName, notInDbGroupServer);
-                
-                var key = CreateMasterKey(out _);
+                Encryption.DeleteSecretKeyForDatabaseFromServerStore(databaseName, notInDbGroupServer);
+
+                var key = Encryption.CreateMasterKey(out _);
                 var copy = new string(key); // need to copy because we nullify the underlying mem after putting the key
 
                 notInDbGroupServer.ServerStore.PutSecretKey(key, databaseName, overwrite: false);
@@ -101,7 +105,7 @@ namespace SlowTests.Issues
 
                 await DeleteNodeFromGroup(store, notInDbGroupServer);
 
-                notInDbGroupServer.ServerStore.PutSecretKey(CreateMasterKey(out _), databaseName, overwrite: true);
+                notInDbGroupServer.ServerStore.PutSecretKey(Encryption.CreateMasterKey(out _), databaseName, overwrite: true);
 
                 await Assert.ThrowsAsync<RavenException>(() => AddNodeToGroup(store));
 
@@ -118,7 +122,7 @@ namespace SlowTests.Issues
             var deleteResult = await store.Maintenance.Server.SendAsync(
                 new DeleteDatabasesOperation(store.Database, hardDelete: false, fromNode: notInDbGroupServer.ServerStore.NodeTag,
                     timeToWaitForConfirmation: TimeSpan.FromSeconds(30)));
-            await WaitForRaftIndexToBeAppliedInCluster(deleteResult.RaftCommandIndex + 1, TimeSpan.FromSeconds(30));
+            await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(deleteResult.RaftCommandIndex + 1, TimeSpan.FromSeconds(30));
 
             var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
             Assert.Equal(2, record.Topology.Count);
@@ -128,7 +132,7 @@ namespace SlowTests.Issues
         private async Task AddNodeToGroup(DocumentStore store)
         {
             var addResult = await store.Maintenance.Server.SendAsync(new AddDatabaseNodeOperation(store.Database));
-            await WaitForRaftIndexToBeAppliedInCluster(addResult.RaftCommandIndex, TimeSpan.FromSeconds(30));
+            await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(addResult.RaftCommandIndex, TimeSpan.FromSeconds(30));
             var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
             Assert.Equal(3, record.Topology.Count);
         }
@@ -138,7 +142,7 @@ namespace SlowTests.Issues
         {
             var (nodes, leader, certificates) = await CreateRaftClusterWithSsl(3);
 
-            EncryptedCluster(nodes, certificates, out var databaseName);
+            Encryption.EncryptedCluster(nodes, certificates, out var databaseName);
 
             var options = new Options
             {
@@ -154,7 +158,7 @@ namespace SlowTests.Issues
             {
                 var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
                 var notInDbGroupServer = nodes.Single(s => record.Topology.AllNodes.Contains(s.ServerStore.NodeTag) == false);
-                DeleteSecretKeyForDatabaseFromServerStore(databaseName, notInDbGroupServer);
+                Encryption.DeleteSecretKeyForDatabaseFromServerStore(databaseName, notInDbGroupServer);
 
                 await Assert.ThrowsAsync<RavenException>(async () => await store.Maintenance.Server.SendAsync(new AddDatabaseNodeOperation(store.Database)));
 
@@ -168,7 +172,7 @@ namespace SlowTests.Issues
                 }))
                 {
                     await Assert.ThrowsAsync<DatabaseLoadFailureException>(async () => await TrySavingDocument(notInDbGroupStore));
-                    PutSecretKeyForDatabaseInServerStore(databaseName, notInDbGroupServer);
+                    Encryption.PutSecretKeyForDatabaseInServerStore(databaseName, notInDbGroupServer);
                     await notInDbGroupServer.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(databaseName, ignoreDisabledDatabase: true);
                     await TrySavingDocument(notInDbGroupStore);
                 }
@@ -190,7 +194,7 @@ namespace SlowTests.Issues
         [Fact]
         public async Task DeletingMasterKeyForExistedEncryptedDatabaseShouldFail()
         {
-            EncryptedServer(out var certificates, out var databaseName);
+            Encryption.EncryptedServer(out var certificates, out var databaseName);
 
             var options = new Options
             {
@@ -224,7 +228,7 @@ namespace SlowTests.Issues
         {
             var (nodes, server, certificates) = await CreateRaftClusterWithSsl(3);
 
-            EncryptedCluster(nodes, certificates, out var databaseName);
+            Encryption.EncryptedCluster(nodes, certificates, out var databaseName);
 
             var options = new Options
             {
@@ -257,6 +261,93 @@ namespace SlowTests.Issues
                         return databaseRecord.Topology;
                     }
                 }
+            }
+        }
+
+        [Fact]
+        public async Task EnsureDatabaseDeletedFromCertificate()
+        {
+            var (nodes, leader, certificates) = await CreateRaftClusterWithSsl(3);
+            var adminClusterCert = certificates.ClientCertificate1.Value;
+            var userCert = certificates.ClientCertificate2.Value;
+
+            var databaseName = GetDatabaseName();
+            foreach (var node in nodes)
+            {
+                Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, userCert, new Dictionary<string, DatabaseAccess>() { [databaseName] = DatabaseAccess.Admin }, SecurityClearance.ValidUser, node);
+                Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, adminClusterCert, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, node);
+            }
+
+            using (var store = GetDocumentStore(new Options
+            {
+                Server = leader,
+                ReplicationFactor = 3,
+                AdminCertificate = certificates.ServerCertificate.Value,
+                ClientCertificate = userCert,
+                ModifyDatabaseName = _ => databaseName,
+                DeleteDatabaseOnDispose = false
+            }))
+            {
+                await TrySavingDocument(store);
+            }
+
+            using (var store = new DocumentStore()
+            {
+                Database = databaseName,
+                Urls = new string[] { leader.WebUrl },
+                Certificate = adminClusterCert
+            }.Initialize())
+            {
+                //check cert is saved with this db as expected
+                var cert = await store.Maintenance.Server.SendAsync(new GetCertificateOperation(userCert.Thumbprint));
+                Assert.True(cert.Permissions.ContainsKey(databaseName));
+
+                //delete the database
+                var res = await store.Maintenance.Server.SendAsync(new DeleteDatabasesOperation(databaseName, true));
+                await Cluster.WaitForRaftIndexToBeAppliedOnClusterNodesAsync(res.RaftCommandIndex, nodes);
+
+                var actual = WaitForValue(GetTopologyCount, 0);
+                Assert.Equal(0, actual);
+
+                int GetTopologyCount()
+                {
+                    var count = 0;
+                    foreach (var node in nodes)
+                    {
+                        using (node.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
+                        using (ctx.OpenReadTransaction())
+                        using (var databaseRecord = node.ServerStore.Cluster.ReadRawDatabaseRecord(ctx, databaseName))
+                        {
+                            if (databaseRecord != null)
+                                count++;
+                        }
+                    }
+
+                    return count;
+                }
+
+                //create database with the same name as deleted one
+                var (index, servers) = await CreateDatabaseInCluster(databaseName, 3, leader.WebUrl, adminClusterCert);
+                await Cluster.WaitForRaftIndexToBeAppliedOnClusterNodesAsync(index, servers);
+
+                //check db has been deleted from the permissions of cert
+                var changedCert = await store.Maintenance.Server.SendAsync(new GetCertificateOperation(userCert.Thumbprint));
+                Assert.False(changedCert.Permissions.ContainsKey(databaseName));
+            }
+
+            //try accessing the new database with the old database certificate
+            using (var store = new DocumentStore()
+            {
+                Urls = new[] { leader.WebUrl },
+                Certificate = userCert,
+                Database = databaseName,
+            }.Initialize())
+            {
+                var requestExecutor = store.GetRequestExecutor(databaseName);
+                requestExecutor.RemoveHttpClient(); // reset to forget the previous connection
+
+                var ex = await Assert.ThrowsAsync<AuthorizationException>(async () => await TrySavingDocument((DocumentStore)store));
+                Assert.Contains($"Could not authorize access to {databaseName} using provided client certificate", ex.Message);
             }
         }
     }

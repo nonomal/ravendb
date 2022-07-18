@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +12,8 @@ using Microsoft.Net.Http.Headers;
 using Raven.Client.Documents.Attachments;
 using Raven.Client.Documents.Changes;
 using Raven.Client.Documents.Commands.Batches;
+using Raven.Client.Documents.Indexes;
+using Raven.Client.Documents.Linq;
 using Raven.Client.Documents.Operations.Attachments;
 using Raven.Client.Documents.Operations.Counters;
 using Raven.Client.Documents.Session;
@@ -72,7 +73,7 @@ namespace Raven.Server.Documents.Handlers
                         BatchTrafficWatch(command.ParsedCommands);
                     }
                 }
-                
+
                 var disableAtomicDocumentWrites = GetBoolValueQueryString("disableAtomicDocumentWrites", required: false) ??
                                                   Database.Configuration.Cluster.DisableAtomicDocumentWrites;
 
@@ -142,7 +143,7 @@ namespace Raven.Server.Documents.Handlers
 
         private void CheckBackwardCompatibility(ref bool disableAtomicDocumentWrites)
         {
-            if (disableAtomicDocumentWrites) 
+            if (disableAtomicDocumentWrites)
                 return;
 
             if (RequestRouter.TryGetClientVersion(HttpContext, out var clientVersion) == false)
@@ -226,10 +227,13 @@ namespace Raven.Server.Documents.Handlers
             var clusterTransactionCommand = new ClusterTransactionCommand(Database.Name, Database.IdentityPartsSeparator, topology, command.ParsedCommands, options, raftRequestId);
             var result = await ServerStore.SendToLeaderAsync(clusterTransactionCommand);
 
-            if (result.Result is List<string> errors)
+            if (result.Result is List<ClusterTransactionCommand.ClusterTransactionErrorInfo> errors)
             {
                 HttpContext.Response.StatusCode = (int)HttpStatusCode.Conflict;
-                throw new ConcurrencyException($"Failed to execute cluster transaction due to the following issues: {string.Join(Environment.NewLine, errors)}");
+                throw new ClusterTransactionConcurrencyException($"Failed to execute cluster transaction due to the following issues: {string.Join(Environment.NewLine, errors.Select(e => e.Message))}")
+                {
+                    ConcurrencyViolations = errors.Select(e => e.Violation).ToArray()
+                };
             }
 
             // wait for the command to be applied on this node
@@ -338,7 +342,10 @@ namespace Raven.Server.Documents.Handlers
                               $"to {numberOfReplicasToWaitFor} servers in {waitForReplicasTimeout}. " +
                               $"So far, it only replicated to {replicatedPast}";
 
-                throw new TimeoutException(message);
+                throw new RavenTimeoutException(message)
+                {
+                    FailImmediately = true
+                };
             }
         }
 
@@ -391,8 +398,9 @@ namespace Raven.Server.Documents.Handlers
                 using (var context = QueryOperationContext.Allocate(database, needsServerContext))
                 using (context.OpenReadTransaction())
                 {
-                    foreach (var waitForIndexItem in indexesToWait)
+                    for (var i = 0; i < indexesToWait.Count; i++)
                     {
+                        var waitForIndexItem = indexesToWait[i];
                         if (waitForIndexItem.Index.IsStale(context, cutoffEtag) == false)
                             continue;
 
@@ -405,9 +413,7 @@ namespace Raven.Server.Documents.Handlers
                             if (throwOnTimeout == false)
                                 return;
 
-                            throw new TimeoutException(
-                                $"After waiting for {sp.Elapsed}, could not verify that {indexesToCheck.Count} " +
-                                $"indexes has caught up with the changes as of etag: {cutoffEtag}");
+                            ThrowTimeoutException(indexesToWait, i, sp, context, cutoffEtag);
                         }
                     }
                 }
@@ -415,6 +421,48 @@ namespace Raven.Server.Documents.Handlers
                 if (hadStaleIndexes == false)
                     return;
             }
+        }
+
+        private static void ThrowTimeoutException(List<WaitForIndexItem> indexesToWait, int i, Stopwatch sp, QueryOperationContext context, long cutoffEtag)
+        {
+            var staleIndexesCount = 0;
+            var erroredIndexes = new List<string>();
+            var pausedIndexes = new List<string>();
+
+            for (var j = i; j < indexesToWait.Count; j++)
+            {
+                var index = indexesToWait[j].Index;
+
+                if (index.State == IndexState.Error)
+                {
+                    erroredIndexes.Add(index.Name);
+                }
+                else if (index.Status == IndexRunningStatus.Paused)
+                {
+                    pausedIndexes.Add(index.Name);
+                }
+
+                if (index.IsStale(context, cutoffEtag))
+                    staleIndexesCount++;
+            }
+
+            var errorMessage = $"After waiting for {sp.Elapsed}, could not verify that all indexes has caught up with the changes as of etag: {cutoffEtag:#,#;;0}. " +
+                               $"Total relevant indexes: {indexesToWait.Count}, total stale indexes: {staleIndexesCount}";
+
+            if (erroredIndexes.Count > 0)
+            {
+                errorMessage += $", total errored indexes: {erroredIndexes.Count} ({string.Join(", ", erroredIndexes)})";
+            }
+
+            if (pausedIndexes.Count > 0)
+            {
+                errorMessage += $", total paused indexes: {pausedIndexes.Count} ({string.Join(", ", pausedIndexes)})";
+            }
+
+            throw new RavenTimeoutException(errorMessage)
+            {
+                FailImmediately = true
+            };
         }
 
         private static List<Index> GetImpactedIndexesToWaitForToBecomeNonStale(DocumentDatabase database, List<string> specifiedIndexesQueryString, HashSet<string> modifiedCollections)
@@ -437,6 +485,9 @@ namespace Raven.Server.Documents.Handlers
             {
                 foreach (var index in database.IndexStore.GetIndexes())
                 {
+                    if (index.State is IndexState.Disabled)
+                        continue;
+
                     if (index.Collections.Contains(Constants.Documents.Collections.AllDocumentsCollection) ||
                         index.WorksOnAnyCollection(modifiedCollections))
                     {
@@ -768,7 +819,7 @@ namespace Raven.Server.Documents.Handlers
                     Debug.Assert(false, "Shouldn't happen - cluster tx run via normal means");
                     return 0;// should never happened
                 }
-
+                Reply.Clear();
                 _disposables.Clear();
 
                 DocumentsStorage.PutOperationResults? lastPutResult = null;
@@ -802,13 +853,13 @@ namespace Raven.Server.Documents.Handlers
                                     Database.DocumentsStorage.RevisionsStorage.Put(context, existingDocument.Id,
                                                                                    existingDocument.Data.Clone(context),
                                                                                    existingDocument.Flags |= DocumentFlags.HasRevisions,
-                                                                                   nonPersistentFlags: NonPersistentDocumentFlags.None,
+                                                                                   nonPersistentFlags: NonPersistentDocumentFlags.ForceRevisionCreation,
                                                                                    existingDocument.ChangeVector,
                                                                                    existingDocument.LastModified.Ticks);
                                     flags |= DocumentFlags.HasRevisions;
                                 }
 
-                                putResult = Database.DocumentsStorage.Put(context, cmd.Id, cmd.ChangeVector, cmd.Document, 
+                                putResult = Database.DocumentsStorage.Put(context, cmd.Id, cmd.ChangeVector, cmd.Document,
                                     oldChangeVectorForClusterTransactionIndexCheck: cmd.OriginalChangeVector, flags: flags);
                             }
                             catch (Voron.Exceptions.VoronConcurrencyErrorException)
@@ -838,13 +889,23 @@ namespace Raven.Server.Documents.Handlers
 
                         case CommandType.PATCH:
                         case CommandType.BatchPATCH:
-                                cmd.PatchCommand.ExecuteDirectly(context);
+                            cmd.PatchCommand.ExecuteDirectly(context);
 
                             var lastChangeVector = cmd.PatchCommand.HandleReply(Reply, ModifiedCollections);
 
                             if (lastChangeVector != null)
                                 LastChangeVector = lastChangeVector;
 
+                            break;
+
+                        case CommandType.JsonPatch:
+                            
+                            cmd.JsonPatchCommand.ExecuteDirectly(context);
+
+                            var lastChangeVectorJsonPatch = cmd.JsonPatchCommand.HandleReply(Reply, ModifiedCollections, Database);
+
+                            if (lastChangeVectorJsonPatch != null)
+                                LastChangeVector = lastChangeVectorJsonPatch;
                             break;
 
                         case CommandType.DELETE:
@@ -990,6 +1051,7 @@ namespace Raven.Server.Documents.Handlers
                             break;
 
                         case CommandType.TimeSeries:
+                        case CommandType.TimeSeriesWithIncrements:
                             EtlGetDocIdFromPrefixIfNeeded(ref cmd.Id, cmd, lastPutResult);
                             var tsCmd = new TimeSeriesHandler.ExecuteTimeSeriesBatchCommand(Database, cmd.Id, cmd.TimeSeries, cmd.FromEtl);
 
@@ -1001,7 +1063,7 @@ namespace Raven.Server.Documents.Handlers
                             {
                                 [nameof(BatchRequestParser.CommandData.Id)] = cmd.Id,
                                 [nameof(BatchRequestParser.CommandData.ChangeVector)] = tsCmd.LastChangeVector,
-                                [nameof(BatchRequestParser.CommandData.Type)] = nameof(CommandType.TimeSeries),
+                                [nameof(BatchRequestParser.CommandData.Type)] = cmd.Type,
                                 //TODO: handle this
                                 //[nameof(Constants.Fields.CommandData.DocumentChangeVector)] = tsCmd.LastDocumentChangeVector
                             });
@@ -1037,7 +1099,7 @@ namespace Raven.Server.Documents.Handlers
                                 Documents = new List<DocumentCountersOperation> { cmd.Counters },
                                 FromEtl = cmd.FromEtl
                             });
-                                counterBatchCmd.ExecuteDirectly(context);
+                            counterBatchCmd.ExecuteDirectly(context);
 
                             LastChangeVector = counterBatchCmd.LastChangeVector;
 
@@ -1089,7 +1151,7 @@ namespace Raven.Server.Documents.Handlers
                             revisionCreated = Database.DocumentsStorage.RevisionsStorage.Put(context, existingDoc.Id,
                                                                                          clonedDocData,
                                                                                          existingDoc.Flags,
-                                                                                         nonPersistentFlags: NonPersistentDocumentFlags.None,
+                                                                                         nonPersistentFlags: NonPersistentDocumentFlags.ForceRevisionCreation,
                                                                                          existingDoc.ChangeVector,
                                                                                          existingDoc.LastModified.Ticks);
                             if (revisionCreated)
@@ -1119,6 +1181,7 @@ namespace Raven.Server.Documents.Handlers
 
                             Reply.Add(forceRevisionReply);
                             break;
+                        
                     }
                 }
 
@@ -1229,12 +1292,12 @@ namespace Raven.Server.Documents.Handlers
                     patch: (ParsedCommands[i].Patch, ParsedCommands[i].PatchArgs),
                     patchIfMissing: (ParsedCommands[i].PatchIfMissing, ParsedCommands[i].PatchIfMissingArgs),
                     database: database,
-                    createIfMissing:ParsedCommands[i].CreateIfMissing,
+                    createIfMissing: ParsedCommands[i].CreateIfMissing,
                     isTest: false,
                     debugMode: false,
                     collectResultsNeeded: true,
                     returnDocument: ParsedCommands[i].ReturnDocument
-                    
+
                 );
             }
 

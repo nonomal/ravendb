@@ -59,8 +59,7 @@ namespace Raven.Server.Documents.Handlers
                             return;
                         }
 
-                        var diagnostics = GetBoolValueQueryString("diagnostics", required: false) ?? false;
-                        await Query(queryContext, token, tracker, httpMethod, diagnostics);
+                        await Query(queryContext, token, tracker, httpMethod);
                     }
                 }
                 catch (Exception e)
@@ -89,7 +88,7 @@ namespace Raven.Server.Documents.Handlers
 
         private async Task FacetedQuery(IndexQueryServerSide indexQuery, QueryOperationContext queryContext, OperationCancelToken token)
         {
-            var existingResultEtag = GetLongFromHeaders("If-None-Match");
+            var existingResultEtag = GetLongFromHeaders(Constants.Headers.IfNoneMatch);
 
             var result = await Database.QueryRunner.ExecuteFacetedQuery(indexQuery, existingResultEtag, queryContext, token);
 
@@ -108,22 +107,25 @@ namespace Raven.Server.Documents.Handlers
             }
 
             Database.QueryMetadataCache.MaybeAddToCache(indexQuery.Metadata, result.IndexName);
-            AddPagingPerformanceHint(PagingOperationType.Queries, $"{nameof(FacetedQuery)} ({result.IndexName})", indexQuery.Query, numberOfResults, indexQuery.PageSize, result.DurationInMs, -1);
+            
+            if (ShouldAddPagingPerformanceHint(numberOfResults))
+                AddPagingPerformanceHint(PagingOperationType.Queries, $"{nameof(FacetedQuery)} ({result.IndexName})", $"{indexQuery.Metadata.QueryText}\n{indexQuery.QueryParameters}", numberOfResults, indexQuery.PageSize, result.DurationInMs, -1);
         }
 
-        private async Task Query(QueryOperationContext queryContext, OperationCancelToken token, RequestTimeTracker tracker, HttpMethod method, bool diagnostics)
+        private async Task Query(QueryOperationContext queryContext, OperationCancelToken token, RequestTimeTracker tracker, HttpMethod method)
         {
             var indexQuery = await GetIndexQuery(queryContext.Documents, method, tracker);
             
-            indexQuery.Diagnostics = diagnostics ? new List<string>() : null;
+            indexQuery.Diagnostics = GetBoolValueQueryString("diagnostics", required: false) ?? false ? new List<string>() : null;
             indexQuery.AddTimeSeriesNames = GetBoolValueQueryString("addTimeSeriesNames", false) ?? false;
+            indexQuery.DisableAutoIndexCreation = GetBoolValueQueryString("disableAutoIndexCreation", false) ?? false;
 
             queryContext.WithQuery(indexQuery.Metadata);
 
             if (TrafficWatchManager.HasRegisteredClients)
                 TrafficWatchQuery(indexQuery);
 
-            var existingResultEtag = GetLongFromHeaders("If-None-Match");
+            var existingResultEtag = GetLongFromHeaders(Constants.Headers.IfNoneMatch);
 
             if (indexQuery.Metadata.HasFacet)
             {
@@ -168,7 +170,9 @@ namespace Raven.Server.Documents.Handlers
             }
 
             Database.QueryMetadataCache.MaybeAddToCache(indexQuery.Metadata, result.IndexName);
-            AddPagingPerformanceHint(PagingOperationType.Queries, $"{nameof(Query)} ({result.IndexName})", indexQuery.Query, numberOfResults, indexQuery.PageSize, result.DurationInMs, totalDocumentsSizeInBytes);
+            
+            if (ShouldAddPagingPerformanceHint(numberOfResults))
+                AddPagingPerformanceHint(PagingOperationType.Queries, $"{nameof(Query)} ({result.IndexName})", $"{indexQuery.Metadata.QueryText}\n{indexQuery.QueryParameters}", numberOfResults, indexQuery.PageSize, result.DurationInMs, totalDocumentsSizeInBytes);
         }
 
         private Action<AbstractBlittableJsonTextWriter> WriteAdditionalData(IndexQueryServerSide indexQuery, bool shouldReturnServerSideQuery)
@@ -196,18 +200,19 @@ namespace Raven.Server.Documents.Handlers
         private async Task<IndexQueryServerSide> GetIndexQuery(JsonOperationContext context, HttpMethod method, RequestTimeTracker tracker)
         {
             var addSpatialProperties = GetBoolValueQueryString("addSpatialProperties", required: false) ?? false;
+            var clientQueryId = GetStringQueryString("clientQueryId", required: false);
 
             if (method == HttpMethod.Get)
-                return await IndexQueryServerSide.CreateAsync(HttpContext, GetStart(), GetPageSize(), context, tracker, addSpatialProperties);
+                return await IndexQueryServerSide.CreateAsync(HttpContext, GetStart(), GetPageSize(), context, tracker, addSpatialProperties, clientQueryId);
 
             var json = await context.ReadForMemoryAsync(RequestBodyStream(), "index/query");
 
-            return IndexQueryServerSide.Create(HttpContext, json, Database.QueryMetadataCache, tracker, addSpatialProperties, Database);
+            return IndexQueryServerSide.Create(HttpContext, json, Database.QueryMetadataCache, tracker, addSpatialProperties, clientQueryId, Database);
         }
 
         private async Task SuggestQuery(IndexQueryServerSide indexQuery, QueryOperationContext queryContext, OperationCancelToken token)
         {
-            var existingResultEtag = GetLongFromHeaders("If-None-Match");
+            var existingResultEtag = GetLongFromHeaders(Constants.Headers.IfNoneMatch);
             var result = await Database.QueryRunner.ExecuteSuggestionQuery(indexQuery, queryContext, existingResultEtag, token);
             if (result.NotModified)
             {
@@ -224,7 +229,8 @@ namespace Raven.Server.Documents.Handlers
                 (numberOfResults, totalDocumentsSizeInBytes) = await writer.WriteSuggestionQueryResultAsync(queryContext.Documents, result, token.Token);
             }
 
-            AddPagingPerformanceHint(PagingOperationType.Queries, $"{nameof(SuggestQuery)} ({result.IndexName})", indexQuery.Query, numberOfResults, indexQuery.PageSize, result.DurationInMs, totalDocumentsSizeInBytes);
+            if (ShouldAddPagingPerformanceHint(numberOfResults))
+                AddPagingPerformanceHint(PagingOperationType.Queries, $"{nameof(SuggestQuery)} ({result.IndexName})", indexQuery.Query, numberOfResults, indexQuery.PageSize, result.DurationInMs, totalDocumentsSizeInBytes);
         }
 
         private async Task DetailedGraphResult(QueryOperationContext queryContext, RequestTimeTracker tracker, HttpMethod method)
@@ -470,7 +476,7 @@ namespace Raven.Server.Documents.Handlers
         public async Task Patch()
         {
             var queryContext = QueryOperationContext.Allocate(Database); // we don't dispose this as operation is async
-
+            
             try
             {
                 var reader = await queryContext.Documents.ReadForMemoryAsync(RequestBodyStream(), "queries/patch");
@@ -480,6 +486,8 @@ namespace Raven.Server.Documents.Handlers
                     throw new BadRequestException("Missing 'Query' property.");
 
                 var query = IndexQueryServerSide.Create(HttpContext, queryJson, Database.QueryMetadataCache, null, queryType: QueryType.Update);
+                
+                query.DisableAutoIndexCreation = GetBoolValueQueryString("disableAutoIndexCreation", false) ?? false;
 
                 if (TrafficWatchManager.HasRegisteredClients)
                     TrafficWatchQuery(query);
@@ -558,7 +566,8 @@ namespace Raven.Server.Documents.Handlers
         {
             if (string.Equals(debug, "entries", StringComparison.OrdinalIgnoreCase))
             {
-                await IndexEntries(queryContext, token, tracker, method);
+                var ignoreLimit = GetBoolValueQueryString("ignoreLimit", required: false) ?? false;
+                await IndexEntries(queryContext, token, tracker, method, ignoreLimit);
                 return;
             }
 
@@ -588,12 +597,12 @@ namespace Raven.Server.Documents.Handlers
             throw new NotSupportedException($"Not supported query debug operation: '{debug}'");
         }
 
-        private async Task IndexEntries(QueryOperationContext queryContext, OperationCancelToken token, RequestTimeTracker tracker, HttpMethod method)
+        private async Task IndexEntries(QueryOperationContext queryContext, OperationCancelToken token, RequestTimeTracker tracker, HttpMethod method, bool ignoreLimit)
         {
             var indexQuery = await GetIndexQuery(queryContext.Documents, method, tracker);
-            var existingResultEtag = GetLongFromHeaders("If-None-Match");
+            var existingResultEtag = GetLongFromHeaders(Constants.Headers.IfNoneMatch);
 
-            var result = await Database.QueryRunner.ExecuteIndexEntriesQuery(indexQuery, queryContext, existingResultEtag, token);
+            var result = await Database.QueryRunner.ExecuteIndexEntriesQuery(indexQuery, queryContext, ignoreLimit, existingResultEtag, token);
 
             if (result.NotModified)
             {

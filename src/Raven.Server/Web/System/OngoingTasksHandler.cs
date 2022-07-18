@@ -194,7 +194,7 @@ namespace Raven.Server.Web.System
 
         private OngoingTaskPullReplicationAsHub GetPullReplicationAsHubTaskInfo(ClusterTopology clusterTopology, ExternalReplication ex)
         {
-            var connectionResult = Database.ReplicationLoader.GetExternalReplicationDestination(ex.TaskId);
+            var connectionResult = Database.ReplicationLoader.GetPullReplicationDestination(ex.TaskId, ex.Database);
             var tag = Server.ServerStore.NodeTag; // we can't know about pull replication tasks on other nodes.
 
             return new OngoingTaskPullReplicationAsHub
@@ -222,9 +222,9 @@ namespace Raven.Server.Web.System
                 {
                     connectionStatus = OngoingTaskConnectionStatus.NotOnThisNode;
                 }
-                else if (Database.SubscriptionStorage.TryGetRunningSubscriptionConnection(subscriptionState.SubscriptionId, out var _))
+                else if (Database.SubscriptionStorage.TryGetRunningSubscriptionConnectionsState(subscriptionState.SubscriptionId, out var connectionsState))
                 {
-                    connectionStatus = OngoingTaskConnectionStatus.Active;
+                    connectionStatus = connectionsState.IsSubscriptionActive()? OngoingTaskConnectionStatus.Active : OngoingTaskConnectionStatus.NotActive;
                 }
                 else
                 {
@@ -440,7 +440,7 @@ namespace Raven.Server.Web.System
                 var backupConfiguration = JsonDeserializationServer.BackupConfiguration(json);
                 var backupName = $"One Time Backup #{Interlocked.Increment(ref _oneTimeBackupCounter)}";
 
-                PeriodicBackupRunner.CheckServerHealthBeforeBackup(ServerStore, backupName);
+                BackupUtils.CheckServerHealthBeforeBackup(ServerStore, backupName);
                 ServerStore.LicenseManager.AssertCanAddPeriodicBackup(backupConfiguration);
                 BackupConfigurationHelper.AssertBackupConfigurationInternal(backupConfiguration);
                 BackupConfigurationHelper.AssertDestinationAndRegionAreAllowed(backupConfiguration, ServerStore);
@@ -465,6 +465,7 @@ namespace Raven.Server.Web.System
                     };
 
                     var backupTask = new BackupTask(Database, backupParameters, backupConfiguration, Logger);
+                    var threadName = $"Backup thread {backupName} for database '{Database.Name}'";
 
                     var t = Database.Operations.AddOperation(
                         null,
@@ -477,7 +478,7 @@ namespace Raven.Server.Web.System
                             {
                                 try
                                 {
-                                    Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                                    ThreadHelper.TrySetThreadPriority(ThreadPriority.BelowNormal, threadName, Logger);
                                     NativeMemory.EnsureRegistered();
 
                                     using (Database.PreventFromUnloadingByIdleOperations())
@@ -503,7 +504,7 @@ namespace Raven.Server.Web.System
                                 {
                                     ServerStore.ConcurrentBackupsCounter.FinishBackup(backupName, backupStatus: null, sw.Elapsed, Logger);
                                 }
-                            }, null, $"Backup thread {backupName} for database '{Database.Name}'");
+                            }, null, threadName);
                             return tcs.Task;
                         },
                         id: operationId, token: cancelToken);
@@ -749,7 +750,7 @@ namespace Raven.Server.Web.System
             var configurationName = GetStringQueryString("configurationName"); // etl task name
             var transformationName = GetStringQueryString("transformationName");
 
-            await DatabaseConfigurations((_, databaseName, etlConfiguration, guid) => ServerStore.RemoveEtlProcessState(_, databaseName, configurationName, transformationName, guid), "etl-reset", GetRaftRequestIdFromQuery());
+            await DatabaseConfigurations((_, databaseName, etlConfiguration, guid) => ServerStore.RemoveEtlProcessState(_, databaseName, configurationName, transformationName, guid), "etl-reset", GetRaftRequestIdFromQuery(), statusCode: HttpStatusCode.OK);
         }
 
         [RavenAction("/databases/*/admin/etl", "PUT", AuthorizationStatus.DatabaseAdmin)]
@@ -1203,6 +1204,16 @@ namespace Raven.Server.Web.System
 
                             var subscriptionState = JsonDeserializationClient.SubscriptionState(doc);
                             var tag = Database.WhoseTaskIsIt(record.Topology, subscriptionState, subscriptionState);
+                            OngoingTaskConnectionStatus connectionStatus = OngoingTaskConnectionStatus.NotActive;
+                            if (tag != ServerStore.NodeTag)
+                            {
+                                connectionStatus = OngoingTaskConnectionStatus.NotOnThisNode;
+                            }
+                            else if (Database.SubscriptionStorage.TryGetRunningSubscriptionConnectionsState(key, out var connectionsState))
+                            {
+                                connectionStatus = connectionsState.IsSubscriptionActive() ? OngoingTaskConnectionStatus.Active : OngoingTaskConnectionStatus.NotActive;
+                            }
+
                             var subscriptionStateInfo = new OngoingTaskSubscription
                             {
                                 TaskName = subscriptionState.SubscriptionName,
@@ -1219,11 +1230,10 @@ namespace Raven.Server.Web.System
                                 {
                                     NodeTag = tag,
                                     NodeUrl = clusterTopology.GetUrlFromTag(tag)
-                                }
+                                },
+                                TaskConnectionStatus = connectionStatus
                             };
-
-                            // Todo: here we'll need to talk with the running node? TaskConnectionStatus = subscriptionState.Disabled ? OngoingTaskConnectionStatus.NotActive : OngoingTaskConnectionStatus.Active,
-
+                            
                             await WriteResult(context, subscriptionStateInfo);
                             break;
 
@@ -1457,32 +1467,39 @@ namespace Raven.Server.Web.System
                 _database = database;
                 _context = context;
 
-                switch (type)
+                using (context.Transaction == null ? context.OpenReadTransaction() : null)
+                using (var rawRecord = _serverStore.Cluster.ReadRawDatabaseRecord(context, database.Name))
                 {
-                    case OngoingTaskType.RavenEtl:
-                    case OngoingTaskType.SqlEtl:
-                        using (context.Transaction == null ? context.OpenReadTransaction() : null)
-                        using (var rawRecord = _serverStore.Cluster.ReadRawDatabaseRecord(context, database.Name))
-                        {
-                            if (rawRecord == null)
-                                break;
+                    if (rawRecord == null)
+                        return;
 
-                            if (type == OngoingTaskType.RavenEtl)
-                            {
-                                var ravenEtls = rawRecord.RavenEtls;
-                                var ravenEtl = ravenEtls?.Find(x => x.TaskId == id);
-                                if (ravenEtl != null)
-                                    _deletingEtl = (ravenEtl.Name, ravenEtl.Transforms.Where(x => string.IsNullOrEmpty(x.Name) == false).Select(x => x.Name).ToList());
-                            }
-                            else
-                            {
-                                var sqlEtls = rawRecord.SqlEtls;
-                                var sqlEtl = sqlEtls?.Find(x => x.TaskId == id);
-                                if (sqlEtl != null)
-                                    _deletingEtl = (sqlEtl.Name, sqlEtl.Transforms.Where(x => string.IsNullOrEmpty(x.Name) == false).Select(x => x.Name).ToList());
-                            }
-                        }
-                        break;
+                    switch (type)
+                    {
+                        case OngoingTaskType.RavenEtl:
+                            var ravenEtls = rawRecord.RavenEtls;
+                            var ravenEtl = ravenEtls?.Find(x => x.TaskId == id);
+                            if (ravenEtl != null)
+                                _deletingEtl = (ravenEtl.Name, ravenEtl.Transforms.Where(x => string.IsNullOrEmpty(x.Name) == false).Select(x => x.Name).ToList());
+                            break;
+                        case OngoingTaskType.SqlEtl:
+                            var sqlEtls = rawRecord.SqlEtls;
+                            var sqlEtl = sqlEtls?.Find(x => x.TaskId == id);
+                            if (sqlEtl != null)
+                                _deletingEtl = (sqlEtl.Name, sqlEtl.Transforms.Where(x => string.IsNullOrEmpty(x.Name) == false).Select(x => x.Name).ToList());
+                            break;
+                        case OngoingTaskType.OlapEtl:
+                            var olapEtls = rawRecord.OlapEtls;
+                            var olapEtl = olapEtls?.Find(x => x.TaskId == id);
+                            if (olapEtl != null)
+                                _deletingEtl = (olapEtl.Name, olapEtl.Transforms.Where(x => string.IsNullOrEmpty(x.Name) == false).Select(x => x.Name).ToList());
+                            break;
+                        case OngoingTaskType.ElasticSearchEtl:
+                            var elasticEtls = rawRecord.ElasticSearchEtls;
+                            var elasticEtl = elasticEtls?.Find(x => x.TaskId == id);
+                            if (elasticEtl != null)
+                                _deletingEtl = (elasticEtl.Name, elasticEtl.Transforms.Where(x => string.IsNullOrEmpty(x.Name) == false).Select(x => x.Name).ToList());
+                            break;
+                    }
                 }
             }
 

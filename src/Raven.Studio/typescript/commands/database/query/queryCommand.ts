@@ -9,7 +9,8 @@ class queryCommand extends commandBase {
 
     private static readonly missingEndOfQuery = "Expected end of query";
     
-    constructor(private db: database, private skip: number, private take: number, private criteria: queryCriteria, private disableCache?: boolean) {
+    constructor(private db: database, private skip: number, private take: number, private criteria: queryCriteria,
+                private disableCache?: boolean, private disableAutoIndexCreation?: boolean, private queryId?: string) {
         super();
     }
 
@@ -23,7 +24,9 @@ class queryCommand extends commandBase {
                 highlightings: results.Highlightings,
                 explanations: results.Explanations,
                 timings: results.Timings,
-                includes: results.Includes });
+                includes: results.Includes,
+                includesRevisions: results.RevisionIncludes
+            });
         
         return this.post<pagedResultExtended<document>>(this.getUrl(), this.getPayload(), this.db)
             .then((results) => selector(results))
@@ -133,7 +136,10 @@ f();
             debug: criteria.indexEntries() ? "entries" : undefined,
             addTimeSeriesNames: true,
             addSpatialProperties: true,
-            metadataOnly: typeof(criteria.metadataOnly()) !== 'undefined' ? criteria.metadataOnly() : undefined
+            metadataOnly: typeof(criteria.metadataOnly()) !== 'undefined' ? criteria.metadataOnly() : undefined,
+            ignoreLimit: this.criteria.ignoreIndexQueryLimit(),
+            disableAutoIndexCreation: this.disableAutoIndexCreation,
+            clientQueryId: this.queryId
         };
         
         let urlArgs = this.urlEncodeArgs(argsForPOST);

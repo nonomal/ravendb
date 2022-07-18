@@ -1183,6 +1183,25 @@ more responsive application.
             return changes;
         }
 
+        public IDictionary<string, EntityInfo> GetTrackedEntities()
+        {
+            var tracked = DocumentsById.GetTrackedEntities(this);
+
+            foreach (var id in _knownMissingIds)
+            {
+                if (tracked.ContainsKey(id))
+                    continue;
+
+                tracked.Add(id, new EntityInfo
+                {
+                    Id = id,
+                    IsDeleted = true
+                });
+            }
+
+            return tracked;
+        }
+
         /// <summary>
         /// Gets a value indicating whether any of the entities tracked by the session has changes.
         /// </summary>
@@ -1371,6 +1390,7 @@ more responsive application.
                     commandType != CommandType.AttachmentMOVE &&
                     commandType != CommandType.Counters &&
                     commandType != CommandType.TimeSeries &&
+                    commandType != CommandType.TimeSeriesWithIncrements &&
                     commandType != CommandType.TimeSeriesCopy)
                     DeferredCommandsDictionary[(id, CommandType.ClientModifyDocumentCommand, null)] = command;
             }
@@ -2493,6 +2513,27 @@ more responsive application.
             enumerator.ExposeTimeSeriesStream(result.Result);
 
             return result;
+        }
+
+        internal static void ValidateTimeSeriesName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                throw new InvalidDataException("Time Series name must contain at least one character");
+
+            if (name.StartsWith(Constants.Headers.IncrementalTimeSeriesPrefix, StringComparison.OrdinalIgnoreCase) && name.Contains('@') == false)
+                throw new InvalidDataException($"Time Series name cannot start with {Constants.Headers.IncrementalTimeSeriesPrefix} prefix");
+        }
+
+        internal static void ValidateIncrementalTimeSeriesName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                throw new InvalidDataException("Incremental Time Series name must contain at least one character");
+
+            if (name.StartsWith(Constants.Headers.IncrementalTimeSeriesPrefix, StringComparison.OrdinalIgnoreCase) == false)
+                throw new InvalidDataException($"Incremental Time Series name must start with {Constants.Headers.IncrementalTimeSeriesPrefix} prefix");
+
+            if (name.Contains('@'))
+                throw new InvalidDataException("Time Series from type Rollup cannot be Incremental");
         }
     }
 

@@ -9,6 +9,7 @@ import actionColumn = require("widgets/virtualGrid/columns/actionColumn");
 import killQueryCommand = require("commands/database/query/killQueryCommand");
 import messagePublisher = require("common/messagePublisher");
 import generalUtils = require("common/generalUtils");
+import { highlight, languages } from "prismjs";
 
 type ExecutingQueryInfoWithCache = {
     DatabaseName: string;
@@ -17,6 +18,8 @@ type ExecutingQueryInfoWithCache = {
 }
 
 class runningQueries extends viewModelBase {
+
+    view = require("views/manage/runningQueries.html");
     
     filter = ko.observable<string>();
     
@@ -87,9 +90,9 @@ class runningQueries extends viewModelBase {
         grid.setDefaultSortBy(3, "desc");
         grid.init(() => this.fetchData(), () =>
             [
-                new actionColumn<ExecutingQueryInfoWithCache>(grid, x => this.killQuery(x), "Kill", `<i class="icon-force"></i>`, "70px",
+                new actionColumn<ExecutingQueryInfoWithCache>(grid, x => this.killQuery(x), "Abort", `<i class="icon-force"></i>`, "70px",
                     {
-                        title: () => 'Kill this query'
+                        title: () => 'Abort this query'
                     }),
                 new textColumn<ExecutingQueryInfoWithCache>(grid, x => x.DatabaseName, "Database Name", "15%", {
                     sortable: "string"
@@ -125,7 +128,7 @@ class runningQueries extends viewModelBase {
 
                 if (!_.isUndefined(value)) {
                     const json = JSON.stringify(value, null, 4);
-                    const html = Prism.highlight(json, (Prism.languages as any).javascript);
+                    const html = highlight(json, languages.javascript, "js");
                     onValue(html, json);
                 }
             });
@@ -136,14 +139,14 @@ class runningQueries extends viewModelBase {
     private killQuery(query: ExecutingQueryInfoWithCache) {
         const db = databasesManager.default.getDatabaseByName(query.DatabaseName);
         
-        this.confirmationMessage("Kill the query", "Do you want to kill query for index: " + generalUtils.escapeHtml(query.IndexName) + "?", {
+        this.confirmationMessage("Abort the query", "Do you want to abort query for index: " + generalUtils.escapeHtml(query.IndexName) + "?", {
             html: true
         })
             .done(result => {
                 if (result.can) {
-                    new killQueryCommand(db, query.IndexName, query.RunningQuery.QueryId)
+                    killQueryCommand.byIndexAndQueryId(db, query.IndexName, query.RunningQuery.QueryId)
                         .execute()
-                        .done(() => messagePublisher.reportSuccess("Scheduled query kill"));
+                        .done(() => messagePublisher.reportSuccess("Aborting query"));
                 }
             });
     }

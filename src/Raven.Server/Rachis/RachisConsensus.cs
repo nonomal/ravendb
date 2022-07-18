@@ -22,6 +22,7 @@ using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Commands;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
+using Sparrow;
 using Sparrow.Binary;
 using Sparrow.Json;
 using Sparrow.Json.Parsing;
@@ -34,6 +35,7 @@ using Voron.Data;
 using Voron.Data.Tables;
 using Voron.Impl;
 using Sparrow.Collections;
+using Sparrow.Threading;
 
 namespace Raven.Server.Rachis
 {
@@ -91,9 +93,14 @@ namespace Raven.Server.Rachis
             return StateMachine.ShouldSnapshot(slice, type);
         }
 
-        public override void SnapshotInstalled(long lastIncludedIndex, bool fullSnapshot, CancellationToken token)
+        public override void AfterSnapshotInstalled(long lastIncludedIndex, Task onFullSnapshotInstalledTask, CancellationToken token)
         {
-            StateMachine.OnSnapshotInstalled(lastIncludedIndex, fullSnapshot, _serverStore, token);
+            StateMachine.AfterSnapshotInstalled(lastIncludedIndex, onFullSnapshotInstalledTask, token);
+        }
+
+        public override Task OnSnapshotInstalled(ClusterOperationContext context, long lastIncludedIndex, CancellationToken token)
+        {
+            return StateMachine.OnSnapshotInstalled(context, lastIncludedIndex, token);
         }
 
         public override Task<RachisConnection> ConnectToPeer(string url, string tag, X509Certificate2 certificate)
@@ -381,6 +388,7 @@ namespace Raven.Server.Rachis
         }
 
         public int? MaximalVersion { get; set; }
+        public long? MaxSizeOfSingleRaftCommandInBytes { get; set; }
 
         private Leader _currentLeader;
         public Leader CurrentLeader => _currentLeader;
@@ -421,6 +429,7 @@ namespace Raven.Server.Rachis
                 ElectionTimeout = configuration.Cluster.ElectionTimeout.AsTimeSpan;
                 TcpConnectionTimeout = configuration.Cluster.TcpConnectionTimeout.AsTimeSpan;
                 MaximalVersion = configuration.Cluster.MaximalAllowedClusterVersion;
+                MaxSizeOfSingleRaftCommandInBytes = configuration.Cluster.MaxSizeOfSingleRaftCommand?.GetValue(SizeUnit.Bytes);
 
                 DebuggerAttachedTimeout.LongTimespanIfDebugging(ref _operationTimeout);
                 DebuggerAttachedTimeout.LongTimespanIfDebugging(ref _electionTimeout);
@@ -535,6 +544,7 @@ namespace Raven.Server.Rachis
             {
                 if (tx is LowLevelTransaction llt && llt.Committed)
                 {
+                    ClusterCommandsVersionManager.SetClusterVersion(ClusterCommandsVersionManager.MyCommandsVersion);
                     leader.Start();
                 }
             };
@@ -685,6 +695,64 @@ namespace Raven.Server.Rachis
 
         internal class TestingStuff
         {
+            public class LeaderLockDebug
+            {
+                private readonly TestingStuff _parent;
+                private MultipleUseFlag _lockerFlag;
+                private int _lockerState;
+                private bool IsLocked => _lockerState == 1;
+                private ManualResetEvent _releaser = new ManualResetEvent(false);
+                private ManualResetEvent _sleeper = new ManualResetEvent(false);
+
+                public LeaderLockDebug(TestingStuff parent, MultipleUseFlag lockerFlag)
+                {
+                    _lockerFlag = lockerFlag;
+                    _parent = parent;
+                }
+
+                public void LockLeaderThread()
+                {
+                    var raised = _lockerFlag.Raise();
+                    Interlocked.CompareExchange(ref _lockerState, raised ? 1 : 0, 0);
+                    if (raised)
+                    {
+                        _sleeper.WaitOne(TimeSpan.FromSeconds(3));
+                    }
+                }
+
+                public void Awake()
+                {
+                    if (IsLocked)
+                    {
+                        _sleeper.Set();
+                    }
+                }
+
+                public void HangThreadIfLocked()
+                {
+                    if (IsLocked)
+                    {
+                        if (_releaser.WaitOne(TimeSpan.FromSeconds(3)) == false) 
+                            Complete();
+                    }
+                }
+
+                public void Complete()
+                {
+                    _parent.LeaderLock = null;
+
+                    if (IsLocked)
+                    {
+                        _lockerState = 0;
+                        _releaser.Set();
+                    }
+                }
+            }
+
+            internal void CreateLeaderLock(MultipleUseFlag lockerFlag) => LeaderLock = new LeaderLockDebug(this, lockerFlag);
+
+            internal LeaderLockDebug LeaderLock;
+
             internal ManualResetEventSlim Mre = new ManualResetEventSlim(false);
 
             public void OnLeaderElect()
@@ -785,7 +853,7 @@ namespace Raven.Server.Rachis
 
             PrevStates.LimitedSizeEnqueue(transition, 5);
 
-            context.Transaction.InnerTransaction.LowLevelTransaction.AfterCommitWhenNewReadTransactionsPrevented +=
+            context.Transaction.InnerTransaction.LowLevelTransaction.AfterCommitWhenNewTransactionsPrevented +=
                 _ => CurrentState = rachisState; //  we need this to happened while we still under the write lock
 
             context.Transaction.InnerTransaction.LowLevelTransaction.OnDispose += tx =>
@@ -938,7 +1006,7 @@ namespace Raven.Server.Rachis
                 throw new NotLeadingException("Not a leader, cannot accept commands. " + _lastStateChangeReason);
 
             Validator.AssertPutCommandToLeader(cmd);
-            return leader.PutAsync(cmd, OperationTimeout);
+            return leader.PutAsync(cmd, cmd.Timeout ?? OperationTimeout);
         }
 
         public void SwitchToCandidateStateOnTimeout()
@@ -1121,12 +1189,10 @@ namespace Raven.Server.Rachis
         /// This method is expected to run for a long time (lifetime of the connection)
         /// and can never throw. We expect this to be on a separate thread
         /// </summary>
-        public void AcceptNewConnection(Stream stream, Action disconnect, EndPoint remoteEndpoint, Action<RachisHello> sayHello = null)
+        public void AcceptNewConnection(RemoteConnection remoteConnection, EndPoint remoteEndpoint, Action<RachisHello> sayHello = null)
         {
-            RemoteConnection remoteConnection = null;
             try
             {
-                remoteConnection = new RemoteConnection(_tag, CurrentTerm, stream, disconnect);
                 try
                 {
                     RachisHello initialMessage;
@@ -1233,7 +1299,7 @@ namespace Raven.Server.Rachis
 
                 try
                 {
-                    stream?.Dispose();
+                    remoteConnection.Stream?.Dispose();
                 }
                 catch (Exception)
                 {
@@ -1289,57 +1355,80 @@ namespace Raven.Server.Rachis
             try
             {
                 using (ContextPool.AllocateOperationContext(out ClusterOperationContext context))
-            using (var tx = context.OpenWriteTransaction())
-            {
-                Table table = context.Transaction.InnerTransaction.OpenTable(LogsTable, EntriesSlice);
-                long reversedIndex = Bits.SwapBytes(index);
-
-                long id;
-                long term;
-                using (Slice.External(context.Allocator, (byte*)&reversedIndex, sizeof(long), out Slice key))
+                using (var tx = context.OpenWriteTransaction())
                 {
-                    if (table.ReadByKey(key, out TableValueReader reader))
+                    Table table = context.Transaction.InnerTransaction.OpenTable(LogsTable, EntriesSlice);
+                    long reversedIndex = Bits.SwapBytes(index);
+
+                    long id;
+                    long term;
+                    using (Slice.External(context.Allocator, (byte*)&reversedIndex, sizeof(long), out Slice key))
                     {
-                        term = *(long*)reader.Read(1, out int size);
-                        id = reader.Id;
+                        if (table.ReadByKey(key, out TableValueReader reader))
+                        {
+                            term = *(long*)reader.Read(1, out int size);
+                            id = reader.Id;
+                        }
+                        else
+                        {
+                            return false;
+                        }
                     }
-                    else
+
+                    var noopCmd = new DynamicJsonValue
                     {
-                        return false;
+                        ["Type"] = $"Noop for {Tag} in term {term}", 
+                        ["Command"] = "noop", 
+                        [nameof(CommandBase.UniqueRequestId)] = Guid.NewGuid().ToString()
+                    };
+                    var cmd = context.ReadObject(noopCmd, "noop-cmd");
+
+                    using (table.Allocate(out TableValueBuilder tvb))
+                    {
+                        tvb.Add(reversedIndex);
+                        tvb.Add(term);
+                        tvb.Add(cmd.BasePointer, cmd.Size);
+                        tvb.Add((int)RachisEntryFlags.Noop);
+                        table.Update(id, tvb, true);
                     }
+
+                    tx.Commit();
                 }
 
-                var noopCmd = new DynamicJsonValue
-                {
-                    ["Type"] = $"Noop for {Tag} in term {term}",
-                    ["Command"] = "noop",
-                    [nameof(CommandBase.UniqueRequestId)] = Guid.NewGuid().ToString()
-                };
-                var cmd = context.ReadObject(noopCmd, "noop-cmd");
-
-                using (table.Allocate(out TableValueBuilder tvb))
-                {
-                    tvb.Add(reversedIndex);
-                    tvb.Add(term);
-                    tvb.Add(cmd.BasePointer, cmd.Size);
-                    tvb.Add((int)RachisEntryFlags.Noop);
-                    table.Update(id, tvb, true);
-                }
-
-                tx.Commit();
+                return true;
             }
-
-            return true;
-        }
             catch (Exception e)
             {
                 throw new RachisApplyException($"Failed to remove entry number {index} from raft log", e);
             }
         }
 
+        public long AppendToLog(CommandBase cmd, long term)
+        {
+            using (ContextPool.AllocateOperationContext(out ClusterOperationContext context))
+            {
+                var djv = cmd.ToJson(context);
+                var cmdJson = context.ReadObject(djv, "raft/command");
+
+                using (var tx = context.OpenWriteTransaction())
+                {
+                    var index = InsertToLeaderLog(context, term, cmdJson, RachisEntryFlags.StateMachineCommand);
+                    tx.Commit();
+             
+                    return index;
+                }
+            }
+        }
+
         public unsafe long InsertToLeaderLog(ClusterOperationContext context, long term, BlittableJsonReaderObject cmd,
             RachisEntryFlags flags)
         {
+            if (MaxSizeOfSingleRaftCommandInBytes.HasValue)
+            {
+                if (cmd.Size > MaxSizeOfSingleRaftCommandInBytes.Value)
+                    ThrowTooLargeRaftCommand(cmd);
+            }
+
             Debug.Assert(context.Transaction != null);
 
             ValidateTerm(term);
@@ -1372,6 +1461,14 @@ namespace Raven.Server.Rachis
             return lastIndex;
         }
 
+        private void ThrowTooLargeRaftCommand(BlittableJsonReaderObject cmd)
+        {
+            var type = RachisLogHistory.GetTypeFromCommand(cmd);
+            throw new ArgumentOutOfRangeException(
+                $"The command '{type}' size of {new Size(cmd.Size, SizeUnit.Bytes)} exceed the max allowed size ({new Size(MaxSizeOfSingleRaftCommandInBytes.Value, SizeUnit.Bytes)})." +
+                $" If it is expected you can modify the setting '{RavenConfiguration.GetKey(x => x.Cluster.MaxSizeOfSingleRaftCommand)}'");
+        }
+
         public unsafe void ClearLogEntriesAndSetLastTruncate(ClusterOperationContext context, long index, long term)
         {
             var table = context.Transaction.InnerTransaction.OpenTable(LogsTable, EntriesSlice);
@@ -1400,14 +1497,14 @@ namespace Raven.Server.Rachis
         {
             GetLastCommitIndex(context, out long lastIndex, out long lastTerm);
 
-            long entryTerm;
+            long truncatedTerm;
             long entryIndex;
 
             if (lastIndex < upto)
             {
                 upto = lastIndex; // max we can delete
                 entryIndex = lastIndex;
-                entryTerm = lastTerm;
+                truncatedTerm = lastTerm;
             }
             else
             {
@@ -1415,7 +1512,7 @@ namespace Raven.Server.Rachis
                 if (maybeTerm == null)
                     return;
                 entryIndex = upto;
-                entryTerm = maybeTerm.Value;
+                truncatedTerm = maybeTerm.Value;
             }
 
             GetLastTruncated(context, out lastIndex, out lastTerm);
@@ -1437,11 +1534,16 @@ namespace Raven.Server.Rachis
                     break;
 
                 Debug.Assert(size == sizeof(long));
-                entryTerm = *(long*)reader.Read(1, out size);
+                var entryTerm = *(long*)reader.Read(1, out size);
+
+                if (entryIndex == upto && truncatedTerm != entryTerm)
+                    break;
+
                 Debug.Assert(size == sizeof(long));
 
                 table.Delete(reader.Id);
                 truncatedIndex = entryIndex;
+                truncatedTerm = entryTerm;
 
                 if (truncatedIndex % 1024 == 0 &&
                     sp.ElapsedMilliseconds > (int)ElectionTimeout.TotalMilliseconds / 3)
@@ -1456,7 +1558,7 @@ namespace Raven.Server.Rachis
             {
                 var data = (long*)ptr;
                 data[0] = truncatedIndex;
-                data[1] = entryTerm;
+                data[1] = truncatedTerm;
             }
         }
 
@@ -1729,7 +1831,7 @@ namespace Raven.Server.Rachis
             throw new TimeoutException();
         }
 
-        public unsafe (long Min, long Max) GetLogEntriesRange(TransactionOperationContext context)
+        public unsafe (long Min, long Max) GetLogEntriesRange(ClusterOperationContext context)
         {
             Debug.Assert(context.Transaction != null);
 
@@ -2129,7 +2231,8 @@ namespace Raven.Server.Rachis
 
         public abstract long Apply(ClusterOperationContext context, long uptoInclusive, Leader leader, Stopwatch duration);
 
-        public abstract void SnapshotInstalled(long lastIncludedIndex, bool fullSnapshot, CancellationToken token);
+        public abstract void AfterSnapshotInstalled(long lastIncludedIndex, Task onFullSnapshotInstalledTask, CancellationToken token);
+        public abstract Task OnSnapshotInstalled(ClusterOperationContext context, long lastIncludedIndex, CancellationToken token);
 
         private readonly AsyncManualResetEvent _leadershipTimeChanged = new AsyncManualResetEvent();
         private int _heartbeatWaitersCounter;

@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Raven.Client.Exceptions;
 using Raven.Client.Http;
 using Raven.Client.ServerWide;
+using Raven.Client.ServerWide.Tcp;
 using Raven.Server.Rachis.Remote;
 using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Context;
@@ -20,6 +21,7 @@ using Sparrow.Server.Utils;
 using Sparrow.Threading;
 using Voron;
 using Voron.Data;
+using Voron.Data.BTrees;
 using Voron.Data.Tables;
 using Voron.Global;
 
@@ -60,6 +62,7 @@ namespace Raven.Server.Rachis
         public AmbassadorStatus Status;
 
         private long _followerMatchIndex;
+        private long _followerLastCommitIndex;
         private long _lastReplyFromFollower;
         private long _lastSendToFollower;
         private string _lastSentMsg;
@@ -85,6 +88,7 @@ namespace Raven.Server.Rachis
         }
 
         public long FollowerMatchIndex => Interlocked.Read(ref _followerMatchIndex);
+        public long FollowerLastCommitIndex => Interlocked.Read(ref _followerLastCommitIndex);
 
         public DateTime LastReplyFromFollower => new DateTime(Interlocked.Read(ref _lastReplyFromFollower));
         public DateTime LastSendToFollower => new DateTime(Interlocked.Read(ref _lastSendToFollower));
@@ -108,6 +112,12 @@ namespace Raven.Server.Rachis
             Interlocked.Exchange(ref _lastReplyFromFollower, DateTime.UtcNow.Ticks);
             Interlocked.Exchange(ref _followerMatchIndex, newVal);
             _wakeLeader.Set();
+        }
+
+        private void UpdateLastMatchFromFollower(AppendEntriesResponse response)
+        {
+            Interlocked.Exchange(ref _followerLastCommitIndex, response.LastCommitIndex);
+            UpdateLastMatchFromFollower(response.LastLogIndex);
         }
 
         private void UpdateFollowerTicks()
@@ -141,25 +151,13 @@ namespace Raven.Server.Rachis
         /// it is responsible for talking to the remote follower and maintaining its state.
         /// This can never throw, and will run on its own thread.
         /// </summary>
-
-
         private unsafe void Run()
         {
             _engine.ForTestingPurposes?.BeforeNegotiatingWithFollower();
 
             try
             {
-                try
-                {
-                    Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
-                }
-                catch (Exception e)
-                {
-                    if (_engine.Log.IsInfoEnabled)
-                    {
-                        _engine.Log.Info($"{ToString()} was unable to set the thread priority, will continue with the same priority", e);
-                    }
-                }
+                ThreadHelper.TrySetThreadPriority(ThreadPriority.AboveNormal, ToString(), _engine.Log);
 
                 var connectionBroken = false;
                 var obtainConnectionFailure = false;
@@ -189,11 +187,11 @@ namespace Raven.Server.Rachis
                                         return;
 
                                     var connection = connectTask.Result;
-
                                     var stream = connection.Stream;
                                     var disconnect = connection.Disconnect;
-                                    var con = new RemoteConnection(_tag, _engine.Tag, _term, stream, disconnect);
+                                    var con = new RemoteConnection(_tag, _engine.Tag, _term, stream, connection.SupportedFeatures.Cluster, disconnect);
                                     Interlocked.Exchange(ref _connection, con);
+                                    
                                     ClusterTopology topology;
                                     using (context.OpenReadTransaction())
                                     {
@@ -365,7 +363,7 @@ namespace Raven.Server.Rachis
                                     RachisConcurrencyException.Throw(msg);
                                 }
 
-                                UpdateLastMatchFromFollower(aer.LastLogIndex);
+                                UpdateLastMatchFromFollower(aer);
                             }
 
                             if (_running == false)
@@ -561,9 +559,10 @@ namespace Raven.Server.Rachis
                     {
                         _engine.Log.Info($"{ToString()}: sending snapshot to {_tag} with index={index} term={term}");
                     }
+
                     // we make sure that we routinely update LastReplyFromFollower here
                     // so we'll not leave the leader thinking we abandoned it
-                    UpdateLastMatchFromFollower(_followerMatchIndex);
+                    UpdateFollowerTicks();
                     UpdateLastSend("Send full snapshot");
                     _connection.Send(context, new InstallSnapshot
                     {
@@ -573,7 +572,7 @@ namespace Raven.Server.Rachis
                     });
 
                     WriteSnapshotToFile(context, new BufferedStream(stream));
-                    UpdateLastMatchFromFollower(_followerMatchIndex);
+                    UpdateFollowerTicks();
                 }
 
                 while (true)
@@ -584,7 +583,7 @@ namespace Raven.Server.Rachis
                         UpdateLastMatchFromFollower(aer.LastLogIndex);
                         break;
                     }
-                    UpdateLastMatchFromFollower(_followerMatchIndex);
+                    UpdateFollowerTicks();
                 }
 
                 if (_engine.Log.IsInfoEnabled)
@@ -597,7 +596,7 @@ namespace Raven.Server.Rachis
         private unsafe void WriteSnapshotToFile(ClusterOperationContext context, Stream dest)
         {
             var dueTime = (int)(_engine.ElectionTimeout.TotalMilliseconds / 3);
-            var timer = new Timer(_ => UpdateLastMatchFromFollower(_followerMatchIndex), null, dueTime, dueTime);
+            var timer = new Timer(_ => UpdateFollowerTicks(), null, dueTime, dueTime);
             long totalSizeInBytes = 0;
             var sp = Stopwatch.StartNew();
 
@@ -630,9 +629,17 @@ namespace Raven.Server.Rachis
                             {
                                 case RootObjectType.VariableSizeTree:
                                     var tree = txr.ReadTree(currentTreeKey);
+                                    
                                     binaryWriter.Write(tree.State.NumberOfEntries);
                                     totalSizeInBytes += sizeof(long);
 
+                                    var type = tree.State.Flags;
+                                    if (_connection.Features.MultiTree)
+                                    {
+                                        binaryWriter.Write((int)type);
+                                        totalSizeInBytes += sizeof(int);
+                                    }
+                                    
                                     using (var treeIterator = tree.Iterate(false))
                                     {
                                         if (treeIterator.Seek(Slices.BeforeAllKeys))
@@ -642,11 +649,47 @@ namespace Raven.Server.Rachis
                                                 var currentTreeValueKey = treeIterator.CurrentKey;
                                                 binaryWriter.Write(currentTreeValueKey.Size);
                                                 copier.Copy(currentTreeValueKey.Content.Ptr, currentTreeValueKey.Size);
-                                                var reader = treeIterator.CreateReaderForCurrent();
-                                                binaryWriter.Write(reader.Length);
-                                                copier.Copy(reader.Base, reader.Length);
+                                                totalSizeInBytes += sizeof(int) + currentTreeValueKey.Size;
 
-                                                totalSizeInBytes += sizeof(long) + currentTreeValueKey.Size + reader.Length;
+                                                switch (type)
+                                                {
+                                                    case TreeFlags.None:
+                                                        var reader = treeIterator.CreateReaderForCurrent();
+                                                        binaryWriter.Write(reader.Length);
+                                                        copier.Copy(reader.Base, reader.Length);
+
+                                                        totalSizeInBytes += sizeof(int) + reader.Length;
+                                                        break;
+
+                                                    case TreeFlags.MultiValueTrees:
+
+                                                        if (_connection.Features.MultiTree == false)
+                                                            throw new NotSupportedException(
+                                                                $"The connection '{_connection}' doesn't support '{type}', please upgrade node '{_connection.Dest}'");
+
+                                                        long count = tree.MultiCount(currentTreeValueKey);
+                                                        binaryWriter.Write(count);
+                                                        totalSizeInBytes += sizeof(long);
+
+                                                        using (var multiIt = tree.MultiRead(currentTreeValueKey))
+                                                        {
+                                                            if (multiIt.Seek(Slices.BeforeAllKeys))
+                                                            {
+                                                                do
+                                                                {
+                                                                    var val = multiIt.CurrentKey;
+                                                                    binaryWriter.Write(val.Size);
+                                                                    copier.Copy(val.Content.Ptr, val.Size);
+                                                                    totalSizeInBytes += val.Size + sizeof(int);
+
+                                                                } while (multiIt.MoveNext());
+                                                            }
+                                                        }
+
+                                                        break;
+                                                    default:
+                                                        throw new ArgumentOutOfRangeException($"Can't send snapshot of type {type}");
+                                                }
                                             } while (treeIterator.MoveNext());
                                         }
                                     }
@@ -690,7 +733,7 @@ namespace Raven.Server.Rachis
                 timer.Dispose(mre);
                 while (mre.WaitOne(dueTime) == false)
                 {
-                    UpdateLastMatchFromFollower(_followerMatchIndex);
+                    UpdateFollowerTicks();
                 }
             }
 
@@ -858,13 +901,22 @@ namespace Raven.Server.Rachis
                         }
                         var midIndex = (llr.MinIndex + llr.MaxIndex) / 2;
                         var termFor = _engine.GetTermFor(context, midIndex);
+
+                        truncated |= termFor == null;
+
+                        if (truncated)
+                        {
+                            midIndex = _engine.GetFirstEntryIndex(context);
+                            termFor = _engine.GetTermForKnownExisting(context, midIndex);
+                        }
+
                         Debug.Assert(termFor != 0);
                         lln = new LogLengthNegotiation
                         {
                             Term = _term,
                             PrevLogIndex = midIndex,
                             PrevLogTerm = termFor ?? 0,
-                            Truncated = truncated || termFor == null
+                            Truncated = truncated
                         };
                         if (_engine.Log.IsInfoEnabled)
                         {

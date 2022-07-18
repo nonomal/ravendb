@@ -25,6 +25,8 @@ type indexActionAndCount = {
 }
 
 class indexErrors extends viewModelBase {
+    
+    view = require("views/database/indexes/indexErrors.html");
 
     private allIndexErrors: IndexErrorPerDocument[] = null;
     private filteredIndexErrors: IndexErrorPerDocument[] = null;
@@ -150,7 +152,7 @@ class indexErrors extends viewModelBase {
                     sortable: "string",
                     customComparator: generalUtils.sortAlphaNumeric
                 }),
-                new textColumn<IndexErrorPerDocument>(grid, x => generalUtils.formatUtcDateAsLocal(x.Timestamp), "Date", "20%", {
+                new textColumn<IndexErrorPerDocument>(grid, x => x.LocalTime, "Date", "20%", {
                     sortable: "string"
                 }),
                 new textColumn<IndexErrorPerDocument>(grid, x => x.Action, "Action", "10%", {
@@ -297,11 +299,13 @@ class indexErrors extends viewModelBase {
         const mappedItems = _.flatMap(indexErrors, value => {
             return value.Errors.map((error: Raven.Client.Documents.Indexes.IndexingError): IndexErrorPerDocument =>
                 ({
-                    Timestamp: error.Timestamp,
+                    Timestamp: moment.utc(error.Timestamp).format(),
                     Document: error.Document,
                     Action: error.Action,
                     Error: error.Error,
-                    IndexName: value.Name
+                    IndexName: value.Name,
+                    LocalTime: generalUtils.formatUtcDateAsLocal(error.Timestamp),
+                    RelativeTime: generalUtils.formatDurationByDate(moment.utc(error.Timestamp), true)
                 }));
         });
         

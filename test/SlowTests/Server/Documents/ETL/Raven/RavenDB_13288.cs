@@ -97,6 +97,8 @@ namespace SlowTests.Server.Documents.ETL.Raven
 
                         session.CountersFor("users/1").Increment("likes");
 
+                        session.Advanced.WaitForReplicationAfterSaveChanges();
+
                         session.SaveChanges();
                     }
                 }
@@ -136,7 +138,7 @@ namespace SlowTests.Server.Documents.ETL.Raven
                     }
                 }
 
-                Assert.True(WaitForCounterReplication(new List<IDocumentStore>
+                Assert.True(Replication.WaitForCounterReplication(new List<IDocumentStore>
                 {
                     dest
                 }, "users/1", "likes", 2, TimeSpan.FromSeconds(60)));

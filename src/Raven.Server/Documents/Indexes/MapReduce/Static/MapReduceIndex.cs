@@ -282,11 +282,11 @@ namespace Raven.Server.Documents.Indexes.MapReduce.Static
         {
             TStaticIndex instance;
             if (typeof(TStaticIndex) == typeof(MapReduceIndex))
-                instance = (TStaticIndex)CreateIndexInstance<MapReduceIndex>(definition, documentDatabase.Configuration, IndexDefinitionBase.IndexVersion.CurrentVersion, (staticMapIndexDefinition, staticIndex) => new MapReduceIndex(staticMapIndexDefinition, staticIndex));
+                instance = (TStaticIndex)CreateIndexInstance<MapReduceIndex>(definition, documentDatabase.Configuration, IndexDefinitionBaseServerSide.IndexVersion.CurrentVersion, (staticMapIndexDefinition, staticIndex) => new MapReduceIndex(staticMapIndexDefinition, staticIndex));
             else if (typeof(TStaticIndex) == typeof(MapReduceTimeSeriesIndex))
-                instance = (TStaticIndex)(MapReduceIndex)CreateIndexInstance<MapReduceTimeSeriesIndex>(definition, documentDatabase.Configuration, IndexDefinitionBase.IndexVersion.CurrentVersion, (staticMapIndexDefinition, staticIndex) => new MapReduceTimeSeriesIndex(staticMapIndexDefinition, staticIndex));
+                instance = (TStaticIndex)(MapReduceIndex)CreateIndexInstance<MapReduceTimeSeriesIndex>(definition, documentDatabase.Configuration, IndexDefinitionBaseServerSide.IndexVersion.CurrentVersion, (staticMapIndexDefinition, staticIndex) => new MapReduceTimeSeriesIndex(staticMapIndexDefinition, staticIndex));
             else if (typeof(TStaticIndex) == typeof(MapReduceCountersIndex))
-                instance = (TStaticIndex)(MapReduceIndex)CreateIndexInstance<MapReduceCountersIndex>(definition, documentDatabase.Configuration, IndexDefinitionBase.IndexVersion.CurrentVersion, (staticMapIndexDefinition, staticIndex) => new MapReduceCountersIndex(staticMapIndexDefinition, staticIndex));
+                instance = (TStaticIndex)(MapReduceIndex)CreateIndexInstance<MapReduceCountersIndex>(definition, documentDatabase.Configuration, IndexDefinitionBaseServerSide.IndexVersion.CurrentVersion, (staticMapIndexDefinition, staticIndex) => new MapReduceCountersIndex(staticMapIndexDefinition, staticIndex));
             else
                 throw new NotSupportedException($"Not supported index type {typeof(TStaticIndex).Name}");
 
@@ -319,7 +319,7 @@ namespace Raven.Server.Documents.Indexes.MapReduce.Static
 
         private static MapReduceIndexDefinition CreateIndexDefinition(IndexDefinition definition, RavenConfiguration configuration, long indexVersion, out AbstractStaticIndexBase staticIndex)
         {
-            staticIndex = IndexCompilationCache.GetIndexInstance(definition, configuration);
+            staticIndex = IndexCompilationCache.GetIndexInstance(definition, configuration, indexVersion);
             return new MapReduceIndexDefinition(definition, staticIndex.Maps.Keys, staticIndex.OutputFields, staticIndex.GroupByFields, staticIndex.HasDynamicFields, staticIndex.CollectionsWithCompareExchangeReferences.Count > 0, indexVersion);
         }
 
@@ -480,7 +480,7 @@ namespace Raven.Server.Documents.Indexes.MapReduce.Static
                 _indexContext = indexContext;
                 _groupByFields = index.Definition.GroupByFields;
                 _isMultiMap = index.IsMultiMap;
-                _reduceKeyProcessor = new ReduceKeyProcessor(index.Definition.GroupByFields.Count, index._unmanagedBuffersPool);
+                _reduceKeyProcessor = new ReduceKeyProcessor(index.Definition.GroupByFields.Count, index._unmanagedBuffersPool, index.Definition.Version);
                 _compiledIndex = index._compiled;
             }
 
@@ -670,6 +670,14 @@ namespace Raven.Server.Documents.Indexes.MapReduce.Static
                                 writer.WriteValue(val);
                                 break;
 
+                            case TimeOnly val:
+                                writer.WriteValue(val);
+                                break;
+                            
+                            case DateOnly val:
+                                writer.WriteValue(val);
+                                break;
+                            
                             case BlittableJsonReaderObject val:
                                 var propertyDetails = new BlittableJsonReaderObject.PropertyDetails();
 

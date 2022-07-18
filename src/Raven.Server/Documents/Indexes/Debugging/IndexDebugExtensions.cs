@@ -320,7 +320,7 @@ namespace Raven.Server.Documents.Indexes.Debugging
             };
         }
 
-        private static string GetTreeName(BlittableJsonReaderObject reduceEntry, IndexDefinitionBase indexDefinition, JsonOperationContext context)
+        private static string GetTreeName(BlittableJsonReaderObject reduceEntry, IndexDefinitionBaseServerSide indexDefinition, JsonOperationContext context)
         {
             Dictionary<string, CompiledIndexField> groupByFields;
 
@@ -427,14 +427,22 @@ namespace Raven.Server.Documents.Indexes.Debugging
 
                 var retriever = new MapReduceQueryResultRetriever(null, null, null, null, context, fieldsToFetch, null, null, null);
                 var result = reader
-                     .Query(query, null, fieldsToFetch, new Reference<int>(), new Reference<int>(), retriever, ctx, null, CancellationToken.None)
+                     .Query(query, null, fieldsToFetch, new Reference<int>(), new Reference<int>(), new Reference<int>(), retriever, ctx, null, CancellationToken.None)
                     .ToList();
 
                 if (result.Count == 0)
                     return context.ReadObject(new DynamicJsonValue(), "debug-reduce-result");
 
                 if (result.Count > 1)
-                    throw new InvalidOperationException("Cannot have multiple reduce results for a single reduce key");
+                {
+                    var dvj = new DynamicJsonValue
+                    {
+                        ["MergedResults"] = true,
+                        ["TotalNumberOfResults"] = result.Count,
+                        ["Results"] = new DynamicJsonArray(result.Select(x=>x.Result.Data))
+                    };
+                    return context.ReadObject(dvj, "merged-map-reduce");
+                }
 
                 return result[0].Result.Data;
             }

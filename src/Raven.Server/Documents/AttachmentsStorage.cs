@@ -9,6 +9,7 @@ using Raven.Client.Exceptions;
 using Raven.Client.Exceptions.Documents;
 using Raven.Client.Exceptions.Documents.Indexes;
 using Raven.Server.Documents.Replication.ReplicationItems;
+using Raven.Server.Documents.Revisions;
 using Raven.Server.ServerWide.Context;
 using Sparrow;
 using Sparrow.Binary;
@@ -172,7 +173,8 @@ namespace Raven.Server.Documents
                 var hasDoc = TryGetDocumentTableValueReaderForAttachment(context, documentId, name, lowerDocumentId, out TableValueReader tvr);
                 if (hasDoc == false)
                     throw new InvalidOperationException($"Cannot put attachment {name} on a non existent document '{documentId}'.");
-                if (TableValueToFlags((int)DocumentsTable.Flags, ref tvr).HasFlag(DocumentFlags.Artificial))
+                var flags = TableValueToFlags((int)DocumentsTable.Flags, ref tvr);
+                if (flags.HasFlag(DocumentFlags.Artificial))
                     throw new InvalidOperationException($"Cannot put attachment {name} on artificial document '{documentId}'.");
 
                 using (DocumentIdWorker.GetLowerIdSliceAndStorageKey(context, name, out Slice lowerName, out Slice namePtr))
@@ -235,6 +237,19 @@ namespace Raven.Server.Documents
                                         ThrowConcurrentException(documentId, name, expectedChangeVector, oldChangeVector);
                                 }
 
+                                var doc = _documentsStorage.TableValueToDocument(context, ref tvr);
+                                var collection = _documentsStorage.ExtractCollectionName(context, doc.Data);
+
+                                var configuration = _documentsStorage.RevisionsStorage.GetRevisionsConfiguration(collection.Name, doc.Flags);
+                                if (configuration != null)
+                                {
+                                    var shouldVersionOldDoc = _documentsStorage.RevisionsStorage.ShouldVersionOldDocument(context, flags, doc.Data, doc.ChangeVector, collection);
+                                    if (shouldVersionOldDoc)
+                                    {
+                                        _documentsStorage.RevisionsStorage.Put(context, documentId, doc.Data, flags | DocumentFlags.HasRevisions | DocumentFlags.FromOldDocumentRevision, NonPersistentDocumentFlags.None, doc.ChangeVector, doc.LastModified.Ticks, configuration, collection);
+                                    }
+                                }
+
                                 // Delete the attachment stream only if we have a different hash
                                 using (TableValueToSlice(context, (int)AttachmentsTable.Hash, ref partialTvr, out Slice existingHash))
                                 {
@@ -242,7 +257,7 @@ namespace Raven.Server.Documents
                                     if (putStream)
                                     {
                                         using (TableValueToSlice(context, (int)AttachmentsTable.LowerDocumentIdAndLowerNameAndTypeAndHashAndContentType,
-                                            ref partialTvr, out Slice existingKey))
+                                                   ref partialTvr, out Slice existingKey))
                                         {
                                             var existingEtag = TableValueToEtag((int)AttachmentsTable.Etag, ref partialTvr);
                                             var lastModifiedTicks = _documentDatabase.Time.GetUtcNow().Ticks;
@@ -399,6 +414,16 @@ namespace Raven.Server.Documents
                 return UpdateDocumentAfterAttachmentChange(context, lowerDocumentId, documentId, tvr, null);
             }
         }
+        public void DeleteAttachmentBeforeRevert(DocumentsOperationContext context, LazyStringValue lowerDocId)
+        {
+            var table = context.Transaction.InnerTransaction.OpenTable(AttachmentsSchema, AttachmentsMetadataSlice);
+            using (DocumentIdWorker.GetLowerIdSliceAndStorageKey(context, lowerDocId, out Slice lowerId, out Slice idSlice))
+            {
+                GetAttachmentKeyInternal(context, lowerId.Content.Ptr, lowerId.Content.Length, default, default, default(Slice), null, 0,
+                    KeyType.Prefix, AttachmentType.Document, default, out var key);
+                table.DeleteByPrimaryKeyPrefix(key);
+            }
+        }
 
         public void RevisionAttachments(DocumentsOperationContext context, Slice lowerId, Slice changeVector)
         {
@@ -423,6 +448,37 @@ namespace Raven.Server.Documents
                     attachment.name.Dispose();
                     attachment.contentType.Dispose();
                     attachment.base64Hash.Release(context.Allocator);
+                }
+            }
+        }
+        public void PutAttachmentRevert(DocumentsOperationContext context, Document document, out bool hasAttachments)
+        {
+            hasAttachments = false;
+
+            if (document.Data.TryGet(Client.Constants.Documents.Metadata.Key, out BlittableJsonReaderObject metadata) == false ||
+                metadata.TryGet(Client.Constants.Documents.Metadata.Attachments, out BlittableJsonReaderArray attachments) == false)
+                return;
+
+            foreach (BlittableJsonReaderObject attachment in attachments)
+            {
+                hasAttachments = true;
+
+                if (attachment.TryGet(nameof(AttachmentName.Name), out LazyStringValue name) == false ||
+                    attachment.TryGet(nameof(AttachmentName.ContentType), out LazyStringValue contentType) == false ||
+                    attachment.TryGet(nameof(AttachmentName.Hash), out LazyStringValue hash) == false)
+                    throw new ArgumentException($"The attachment info in missing a mandatory value: {attachment}");
+
+                var cv = Slices.Empty;
+                var type = AttachmentType.Document;
+
+                using (DocumentIdWorker.GetSliceFromId(context, document.Id, out Slice lowerDocumentId))
+                using (DocumentIdWorker.GetLowerIdSliceAndStorageKey(context, name, out Slice lowerName, out Slice nameSlice))
+                using (DocumentIdWorker.GetLowerIdSliceAndStorageKey(context, contentType, out Slice lowerContentType, out Slice contentTypeSlice))
+                using (Slice.External(context.Allocator, hash, out Slice base64Hash))
+                using (GetAttachmentKey(context, lowerDocumentId.Content.Ptr, lowerDocumentId.Size, lowerName.Content.Ptr, lowerName.Size,
+                    base64Hash, lowerContentType.Content.Ptr, lowerContentType.Size, type, cv, out Slice keySlice))
+                {
+                    PutDirect(context, keySlice, nameSlice, contentTypeSlice, base64Hash);
                 }
             }
         }
@@ -911,6 +967,7 @@ namespace Raven.Server.Documents
             throw new ConcurrencyException(
                 $"Attachment {name} of '{documentId}' has change vector {oldChangeVector}, but Put was called with {(expectedChangeVector.Length == 0 ? "expecting new document" : "change vector " + expectedChangeVector)}. Optimistic concurrency violation, transaction will be aborted.")
             {
+                Id = documentId,
                 ActualChangeVector = oldChangeVector,
                 ExpectedChangeVector = expectedChangeVector
             };
@@ -921,6 +978,7 @@ namespace Raven.Server.Documents
             throw new ConcurrencyException(
                 $"Attachment {name} of '{documentId}' does not exist, but Put was called with change vector '{expectedChangeVector}'. Optimistic concurrency violation, transaction will be aborted.")
             {
+                Id = documentId,
                 ExpectedChangeVector = expectedChangeVector
             };
         }
@@ -1010,7 +1068,11 @@ namespace Raven.Server.Documents
                     if (expectedChangeVector != null)
                         throw new ConcurrencyException($"Document {documentId} does not exist, " +
                                                        $"but delete was called with change vector '{expectedChangeVector}' to remove attachment {name}. " +
-                                                       "Optimistic concurrency violation, transaction will be aborted.");
+                                                       "Optimistic concurrency violation, transaction will be aborted.")
+                        {
+                            Id = documentId,
+                            ExpectedChangeVector = expectedChangeVector
+                        };
 
                     // this basically mean that we tried to delete attachment whose document doesn't exist.
                     return;
@@ -1145,7 +1207,10 @@ namespace Raven.Server.Documents
                 if (expectedChangeVector != null)
                     throw new ConcurrencyException($"Attachment {name} with key '{key}' does not exist, " +
                                                    $"but delete was called with change vector '{expectedChangeVector}'. " +
-                                                   "Optimistic concurrency violation, transaction will be aborted.");
+                                                   "Optimistic concurrency violation, transaction will be aborted.")
+                    {
+                        ExpectedChangeVector = expectedChangeVector
+                    };
 
                 // This basically means that we tried to delete attachment that doesn't exist.
                 long attachmentEtag;
@@ -1209,6 +1274,10 @@ namespace Raven.Server.Documents
             var newEtag = _documentsStorage.GenerateNextEtag();
 
             var table = context.Transaction.InnerTransaction.OpenTable(TombstonesSchema, AttachmentsTombstonesSlice);
+
+            if (table.VerifyKeyExists(keySlice))
+                return; // attachments (and attachment tombstones) are immutable, we can safely ignore this
+
             using (table.Allocate(out TableValueBuilder tvb))
             using (Slice.From(context.Allocator, changeVector, out var cv))
             {

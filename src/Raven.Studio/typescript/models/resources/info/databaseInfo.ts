@@ -6,6 +6,7 @@ import activeDatabaseTracker = require("common/shell/activeDatabaseTracker");
 import generalUtils = require("common/generalUtils");
 import databaseGroupNode = require("models/resources/info/databaseGroupNode");
 import accessManager = require("common/shell/accessManager");
+import moment = require("moment");
 
 class databaseInfo {
 
@@ -144,7 +145,7 @@ class databaseInfo {
                 return "Disabled";
             }
 
-            if (this.uptime()) {
+            if (this.online()) {
                 return "Online";
             }
             return "Offline";

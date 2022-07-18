@@ -35,18 +35,21 @@
                                     </div>
                                 </div>
                                 <pre class="form-control editor query-source"
-                                     data-bind="aceEditor: { code: patchDocument().query, allowResize: false, minHeight: 300, maxHeight: 300, lang:'ace/mode/rql', completer: queryCompleter.complete }, validationOptions: { errorsAsTitle: false }, validationElement: patchDocument().query"></pre>
+                                     data-bind="aceEditor: { code: patchDocument().query, allowResize: false, minHeight: 300, maxHeight: 300, lang:'ace/mode/rql', completer: languageService.complete }, validationOptions: { errorsAsTitle: false }, validationElement: patchDocument().query"></pre>
                                 <div data-bind="validationOptions: { errorsAsTitle: false }, validationElement: patchDocument().query">
                                     <div class="help-block" data-bind="validationMessage: patchDocument().query"></div>
                                 </div>
                             </div>
                             <div class="patch-controls">
                                 <div class="flex-separator"></div>
-                                <button class="btn btn-primary btn-block btn-lg text-center" data-bind="click: runPatch" title="Execute patch">
-                                    <i class="icon-play2 icon-lg"></i><br />
-                                    <small class="kbd"><kbd>ctrl</kbd> <strong>+</strong> <kbd>enter</kbd></small>
-                                </button>
-                                <button class="btn btn-default btn-block text-center margin-top" data-bind="click: test.enterTestMode" title="Dry patch run. No data is modified.">
+                                <span class="has-disable-reason" data-bind="attr: { title: spinners.countMatchingDocuments() ? 'Calculating matching documents before patching' : 'Execute patch' }">
+                                    <button class="btn btn-primary btn-block btn-lg text-center"
+                                            data-bind="click: runPatch, css: { 'btn-spinner': spinners.countMatchingDocuments }, disable: spinners.countMatchingDocuments">
+                                        <i class="icon-play2 icon-lg"></i><br />
+                                        <small class="kbd"><kbd>ctrl</kbd> <strong>+</strong> <kbd>enter</kbd></small>
+                                    </button>
+                                </span>
+                                <button class="btn btn-default btn-block text-center margin-top-sm" data-bind="click: test.enterTestMode" title="Dry patch run. No data is modified.">
                                     <i class="icon-rocket"></i><span>Test</span>
                                 </button>
                             </div>
@@ -406,7 +409,11 @@
         </div>
         <hr class="margin-right">
         <div class="margin-left margin-left-sm">
-            <div class="toggle toggle-primary">
+            <div class="toggle">
+                <input id="disableAutoIndex" type="checkbox" data-bind="checked: disableAutoIndexCreation">
+                <label for="disableAutoIndex">Don't create a new Auto-Index</label>
+            </div>
+            <div class="toggle">
                 <input id="maxOperations" class="styled" type="checkbox" data-bind="checked: defineMaxOperationsPerSecond">
                 <label for="maxOperations">Limit number of operations</label>
             </div>

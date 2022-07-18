@@ -12,7 +12,6 @@ using System.Threading.Tasks;
 using FastTests;
 using Raven.Client.Documents;
 using Raven.Client.Documents.Conventions;
-using Raven.Client.Documents.Replication;
 using Raven.Client.Documents.Session;
 using Raven.Client.Exceptions;
 using Raven.Client.Http;
@@ -207,9 +206,47 @@ namespace Tests.Infrastructure
                 fromNode: toDeleteTag, timeToWaitForConfirmation: TimeSpan.FromSeconds(15)));
             await Task.WhenAll(nonDeleted.Select(n =>
                 n.ServerStore.WaitForCommitIndexChange(RachisConsensus.CommitIndexModification.GreaterOrEqual, deleteResult.RaftCommandIndex + 1)));
-            var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(database));
-            Assert.Equal(1, record.UnusedDatabaseIds.Count);
+
+            Assert.True(await WaitForDatabaseToBeDeleted(store, database, TimeSpan.FromSeconds(15)), await Task.Run(async () =>
+            {
+                var sb = new StringBuilder($"database '{database}' was not deleted after 15 seconds");
+                sb.AppendLine("debug logs : ");
+                await GetClusterDebugLogsAsync(sb);
+                return sb.ToString();
+            }));
+
+            await WaitAndAssertForValueAsync(async () =>
+            {
+                var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(database));
+                return record.UnusedDatabaseIds.Count;
+            }, expectedVal: 1, timeout: 10_000);
         }
+
+        public static async Task<bool> WaitForDatabaseToBeDeleted(IDocumentStore store, string databaseName, TimeSpan timeout)
+        {
+            var pollingInterval = timeout.TotalSeconds < 1 ? timeout : TimeSpan.FromSeconds(1);
+            var sw = Stopwatch.StartNew();
+            while (true)
+            {
+                var delayTask = Task.Delay(pollingInterval);
+                var dbTask = store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(databaseName));
+                var doneTask = await Task.WhenAny(dbTask, delayTask);
+                if (doneTask == delayTask)
+                {
+                    if (sw.Elapsed > timeout)
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+                var dbRecord = dbTask.Result;
+                if (dbRecord == null || dbRecord.DeletionInProgress == null || dbRecord.DeletionInProgress.Count == 0)
+                {
+                    return true;
+                }
+            }
+        }
+
 
         public async Task EnsureNoReplicationLoop(RavenServer server, string database)
         {
@@ -459,7 +496,7 @@ namespace Tests.Infrastructure
             return stores;
         }
 
-        private List<DocumentStore> GetDocumentStores(List<RavenServer> nodes, string database, bool disableTopologyUpdates, X509Certificate2 certificate = null)
+        public List<DocumentStore> GetDocumentStores(List<RavenServer> nodes, string database, bool disableTopologyUpdates, X509Certificate2 certificate = null)
         {
             var stores = new List<DocumentStore>();
             foreach (var node in nodes)
@@ -550,6 +587,15 @@ namespace Tests.Infrastructure
             int interval = 100) where T : class
         {
             return await ClusterWaitFor(nodes, database, s => AssertWaitForNotNullAsync(() => act(s), timeout, interval));
+        }
+        public async Task<T[]> ClusterWaitForNotNull<T>(
+            List<RavenServer> nodes,
+            string database,
+            Func<IDocumentStore, Task<T>> act,
+            int timeout = 15000,
+            int interval = 100) where T : class
+        {
+            return await ClusterWaitFor(nodes, database, s => WaitForNotNullAsync(() => act(s), timeout, interval));
         }
 
         public async Task<T[]> AssertClusterWaitForValue<T>(
@@ -715,11 +761,11 @@ namespace Tests.Infrastructure
                 }
             }
             // ReSharper disable once PossibleNullReferenceException
-            var condition = await leader.ServerStore.WaitForState(RachisState.Leader, CancellationToken.None).WaitAsync(numberOfNodes * _electionTimeoutInMs * 5);
+            var condition = await leader.ServerStore.WaitForState(RachisState.Leader, CancellationToken.None).WaitWithoutExceptionAsync(numberOfNodes * _electionTimeoutInMs * 5);
             var states = string.Empty;
             if (condition == false)
             {
-                states = GetLastStatesFromAllServersOrderedByTime();
+                states = Cluster.GetLastStatesFromAllServersOrderedByTime();
             }
             Assert.True(condition, "The leader has changed while waiting for cluster to become stable. All nodes status: " + states);
             return (leader, serversToProxies, certificates);
@@ -770,7 +816,7 @@ namespace Tests.Infrastructure
                 if (useSsl)
                 {
                     serverUrl = UseFiddlerUrl("https://127.0.0.1:0");
-                    certificates = SetupServerAuthentication(customSettings, serverUrl);
+                    certificates = Certificates.SetupServerAuthentication(customSettings, serverUrl);
                 }
                 else
                 {
@@ -825,7 +871,7 @@ namespace Tests.Infrastructure
             await WaitForClusterTopologyOnAllNodes(clusterNodes);
 
             // ReSharper disable once PossibleNullReferenceException
-            var condition = await leader.ServerStore.WaitForState(RachisState.Leader, CancellationToken.None).WaitAsync(numberOfNodes * _electionTimeoutInMs * 5);
+            var condition = await leader.ServerStore.WaitForState(RachisState.Leader, CancellationToken.None).WaitWithoutExceptionAsync(numberOfNodes * _electionTimeoutInMs * 5);
             var states = "The leader has changed while waiting for cluster to become stable. All nodes status: ";
             if (condition == false)
             {
@@ -843,7 +889,7 @@ namespace Tests.Infrastructure
                         e = ex;
                     }
                 }
-                states += GetLastStatesFromAllServersOrderedByTime();
+                states += Cluster.GetLastStatesFromAllServersOrderedByTime();
                 if (e != null)
                     states += $"{Environment.NewLine}{e}";
             }
@@ -867,7 +913,7 @@ namespace Tests.Infrastructure
             if (useSsl)
             {
                 serverUrl = UseFiddlerUrl("https://127.0.0.1:0");
-                certificates = SetupServerAuthentication(customSettings, serverUrl);
+                certificates = Certificates.SetupServerAuthentication(customSettings, serverUrl);
             }
             else
             {
@@ -889,15 +935,7 @@ namespace Tests.Infrastructure
             await Task.WhenAny(tasks);
 
             if (Task.Delay(timeout).IsCompleted)
-                throw new TimeoutException(GetLastStatesFromAllServersOrderedByTime());
-        }
-
-        protected override Task<DocumentDatabase> GetDocumentDatabaseInstanceFor(IDocumentStore store, string database = null)
-        {
-            //var index = FindStoreIndex(store);
-            //Assert.False(index == -1, "Didn't find store index, most likely it doesn't belong to the cluster. Did you setup Raft cluster properly?");
-            //return Servers[index].ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(store.Database);
-            return Server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(database ?? store.Database);
+                throw new TimeoutException(Cluster.GetLastStatesFromAllServersOrderedByTime());
         }
 
         public async Task<(long Index, List<RavenServer> Servers)> CreateDatabaseInCluster(DatabaseRecord record, int replicationFactor, string leadersUrl, X509Certificate2 certificate = null)
@@ -931,7 +969,7 @@ namespace Tests.Infrastructure
                 {
                     //catch debug logs
                     var sb = new StringBuilder();
-                    await GetClusterDebugLogs(sb);
+                    await GetClusterDebugLogsAsync(sb);
                     throw new ConcurrencyException($"Couldn't create database on time, cluster debug logs: {sb}", inner);
                 }
                 urls = await GetClusterNodeUrlsAsync(leadersUrl, store);
@@ -993,12 +1031,12 @@ namespace Tests.Infrastructure
             return CreateDatabaseInCluster(new DatabaseRecord(databaseName), replicationFactor, leadersUrl, certificate);
         }
 
-        public static void WaitForIndexingInTheCluster(IDocumentStore store, string dbName = null, TimeSpan? timeout = null, bool allowErrors = false)
+        public void WaitForIndexingInTheCluster(IDocumentStore store, string dbName = null, TimeSpan? timeout = null, bool allowErrors = false)
         {
             var record = store.Maintenance.Server.Send(new GetDatabaseRecordOperation(dbName ?? store.Database));
             foreach (var nodeTag in record.Topology.AllNodes)
             {
-                WaitForIndexing(store, dbName, timeout, allowErrors, nodeTag);
+                Indexes.WaitForIndexing(store, dbName, timeout, allowErrors, nodeTag);
             }
         }
 
@@ -1066,7 +1104,7 @@ namespace Tests.Infrastructure
 
         }
 
-        internal async Task GetClusterDebugLogs(StringBuilder sb)
+        internal async Task GetClusterDebugLogsAsync(StringBuilder sb)
         {
             (ClusterObserverLogEntry[] List, long Iteration) logs;
             List<DynamicJsonValue> historyLogs = null;

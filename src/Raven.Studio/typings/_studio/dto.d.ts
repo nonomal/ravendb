@@ -78,6 +78,8 @@ interface IndexErrorPerDocument {
     Action: string;
     IndexName: string;
     Timestamp: string;
+    LocalTime: string;
+    RelativeTime: string;
 }
 
 interface revisionTimeSeriesDto {
@@ -149,6 +151,11 @@ interface timeSeriesDeleteCriteria {
 }
 
 type postTimeSeriesDeleteAction = "reloadCurrent" | "changeTimeSeries" | "doNothing";
+
+interface filterTimeSeriesDates<T> {
+    startDate: T;
+    endDate: T;
+}
 
 interface documentAttachmentDto {
     ContentType: string;
@@ -397,7 +404,7 @@ interface SubscriptionConnectionPerformanceStatsWithCache extends Raven.Server.D
     HasErrors: boolean;
 }
 
-interface SubscriptionBatchPerformanceStatsWithCache extends Raven.Server.Documents.Subscriptions.SubscriptionBatchPerformanceStats {
+interface SubscriptionBatchPerformanceStatsWithCache extends Raven.Server.Documents.Subscriptions.Stats.SubscriptionBatchPerformanceStats {
     StartedAsDate: Date;
     CompletedAsDate: Date;
     Type: subscriptionType;
@@ -427,6 +434,7 @@ interface testSubscriptionPagedResult<T> extends pagedResult<T> {
 
 interface pagedResultExtended<T> extends pagedResult<T> {
     includes: dictionary<any>;
+    includesRevisions?: Array<any>;
     highlightings?: dictionary<dictionary<Array<string>>>;
     explanations?: dictionary<Array<string>>;
     timings?: Raven.Client.Documents.Queries.Timings.QueryTimings;
@@ -471,7 +479,10 @@ interface autoCompleteWordList {
     value: string; 
     snippet?: string; 
     score: number; 
-    meta: string 
+    meta: string;
+    completer?: {
+        insertMatch(editor: AceAjax.Editor, data: autoCompleteWordList);
+    }
 }
 
 interface autoCompleteLastKeyword {
@@ -496,7 +507,6 @@ interface rqlQueryInfo {
 }
 
 interface queryCompleterProviders {
-    terms: (indexName: string, collection: string, field: string, pageSize: number, callback: (terms: string[]) => void) => void;
     indexFields: (indexName: string, callback: (fields: string[]) => void) => void;
     collectionFields: (collectionName: string, prefix: string, callback: (fields: dictionary<string>) => void) => void;
     collections: (callback: (collectionNames: string[]) => void) => void;
@@ -506,7 +516,7 @@ interface queryCompleterProviders {
 type rqlQueryType = "Select" | "Update";
 
 type autoCompleteCompleter = (editor: AceAjax.Editor, session: AceAjax.IEditSession, pos: AceAjax.Position, prefix: string, callback: (errors: any[], wordlist: autoCompleteWordList[]) => void) => void;
-type certificateMode = "generate" | "upload" | "editExisting" | "replace";
+type certificateMode = "generate" | "regenerate" | "upload" | "editExisting" | "replace";
 
 type dbCreationMode = "newDatabase" | "restore" | "legacyMigration";
 
@@ -648,6 +658,7 @@ interface textColumnOpts<T> {
     extraClass?: (item: T) => string;
     useRawValue?: (item: T) => boolean;
     title?: (item:T) => string;
+    headerTitle?: string;
     sortable?: "number" | "string" | valueProvider<T>;
     defaultSortOrder?: sortMode;
     customComparator?: (a: any, b: any) => number;
@@ -698,6 +709,7 @@ interface confirmationDialogOptions {
     forceRejectWithResolve?: boolean;
     defaultOption?: string;
     html?: boolean;
+    wideDialog?: boolean;
 }
 
 interface getIndexEntriesFieldsCommandResult {
@@ -759,6 +771,20 @@ interface rawStackTraceResponseItem {
     StackTrace: string[];
 }
 
+interface threadStackTraceResponseDto {
+    Results: Array<threadStackTraceResponseItem>;
+    Threads: Array<Raven.Server.Dashboard.ThreadInfo>;
+}
+type indexStatus = "Normal" | "ErrorOrFaulty" | "Stale" | "Paused" | "Disabled" | "Idle" | "RollingDeployment";
+
+interface threadStackTraceResponseItem {
+    OSThreadId: number;
+    ManagedThreadId: number;
+    IsNative: boolean;
+    ThreadType: string;
+    StackTrace: string[];
+}
+
 type indexStatus = "Normal" | "ErrorOrFaulty" | "Stale" | "Paused" | "Disabled" | "Idle" | "RollingDeployment";
 
 interface MigratorPathConfiguration {
@@ -794,6 +820,7 @@ type settingsTemplateType = Raven.Server.Config.ConfigurationEntryType | "String
 interface TimeSeriesOperation extends Raven.Client.Documents.Operations.TimeSeries.TimeSeriesOperation {
     Appends: Raven.Client.Documents.Operations.TimeSeries.TimeSeriesOperation.AppendOperation[];
     Deletes: Raven.Client.Documents.Operations.TimeSeries.TimeSeriesOperation.DeleteOperation[];
+    Increments: Raven.Client.Documents.Operations.TimeSeries.TimeSeriesOperation.IncrementOperation[];
 }
 
 type TasksNamesInUI = "External Replication" | "RavenDB ETL" | "SQL ETL" | "OLAP ETL" | "Backup" | "Subscription" | "Replication Hub" | "Replication Sink" | "Elasticsearch ETL";
@@ -844,6 +871,11 @@ type accessLevel = databaseAccessLevel | securityClearance;
 interface iconPlusText {
     iconClass: string;
     text: string;
-    textClass: string;
-    title: string;
+    textClass?: string;
+    title?: string;
+}
+
+interface columnPreviewFeature {
+    install($tooltip: JQuery, valueProvider: () => any, elementProvider: () => any, containerSelector: string): void;
+    syntax(column: virtualColumn, escapedValue: any, element: any): void;
 }

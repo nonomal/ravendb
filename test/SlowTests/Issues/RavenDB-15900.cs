@@ -11,6 +11,7 @@ using Raven.Client.ServerWide;
 using Raven.Client.ServerWide.Operations;
 using Raven.Client.Util;
 using Raven.Server.Rachis;
+using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Commands;
 using Raven.Server.ServerWide.Context;
 using Sparrow.Json;
@@ -41,18 +42,17 @@ namespace SlowTests.Issues
         [Fact]
         public async Task RemoveEntryFromRaftLogEP()
         {
-            var (_, leader) = await CreateRaftCluster(3);
+            var (_, leader) = await CreateRaftCluster(3, watcherCluster: true);
             var database = GetDatabaseName();
 
             await CreateDatabaseInClusterInner(new DatabaseRecord(database), 3, leader.WebUrl, null);
             using (var store = new DocumentStore { Database = database, Urls = new[] { leader.WebUrl } }.Initialize())
             {
                 leader.ServerStore.Engine.StateMachine.Validator = new TestCommandValidator();
-                var documentDatabase = await leader.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(database);
 
                 var cmd = new RachisConsensusTestBase.TestCommandWithRaftId("test", RaftIdGenerator.NewId());
 
-                _ = leader.ServerStore.Engine.CurrentLeader.PutAsync(cmd, new TimeSpan(2000));
+                await Assert.ThrowsAsync<UnknownClusterCommand>(() => leader.ServerStore.SendToLeaderAsync(cmd));
 
                 var cmd2 = new CreateDatabaseOperation.CreateDatabaseCommand(new DatabaseRecord("Toli"), 1);
 
@@ -75,21 +75,22 @@ namespace SlowTests.Issues
                     Assert.False(server.ServerStore.DatabasesLandlord.IsDatabaseLoaded("Toli"));
                 }
 
-                long index;
-                using (documentDatabase.ServerStore.Engine.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
-                using (var tx = context.OpenReadTransaction())
-                {
-                    leader.ServerStore.Engine.GetLastCommitIndex(context, out index, out long term);
-                }
+                var index = Cluster.LastRaftIndexForCommand(leader, nameof(TestCommandWithRaftId));
 
-                var nodelist = await store.Maintenance.SendAsync(new RemoveEntryFromRaftLogOperation(index+1));
+                List<string> nodelist = new List<string>();
+                var res = await WaitForValueAsync(async () =>
+                {
+                    nodelist = await store.Maintenance.SendAsync(new RemoveEntryFromRaftLogOperation(index));
+                    return nodelist.Count;
+                }, 3);
+                Assert.Equal(3, res);
 
                 long index2 = 0;
                 foreach (var server in Servers)
                 {
                     await WaitForValueAsync(async () =>
                     {
-                        documentDatabase = await server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(database);
+                        var documentDatabase = await server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(database);
                         using (documentDatabase.ServerStore.Engine.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
                         using (var tx = context.OpenReadTransaction())
                         {
@@ -109,6 +110,7 @@ namespace SlowTests.Issues
                 }
             }
         }
+
 
         private class RemoveEntryFromRaftLogOperation : IMaintenanceOperation<List<string>>
         {
@@ -160,7 +162,7 @@ namespace SlowTests.Issues
         [Fact]
         public async Task RemoveEntryFromRaftLogTest()
         {
-            var (_, leader) = await CreateRaftCluster(3);
+            var (_, leader) = await CreateRaftCluster(3, watcherCluster: true);
             var database = GetDatabaseName();
 
             await CreateDatabaseInClusterInner(new DatabaseRecord(database), 3, leader.WebUrl, null);
@@ -170,7 +172,8 @@ namespace SlowTests.Issues
                 Urls = new[] { leader.WebUrl }
             }.Initialize())
             {
-                leader.ServerStore.Engine.StateMachine.Validator = new TestCommandValidator();
+                await ActionWithLeader(l => l.ServerStore.Engine.StateMachine.Validator = new TestCommandValidator());
+
                 var documentDatabase = await leader.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(database);
 
                 var cmd = new RachisConsensusTestBase.TestCommandWithRaftId("test", RaftIdGenerator.NewId());
@@ -199,6 +202,7 @@ namespace SlowTests.Issues
                 }
 
                 long index = 0;
+
                 foreach (var server in Servers)
                 {
                     index = 0;
@@ -209,7 +213,9 @@ namespace SlowTests.Issues
                         server.ServerStore.Engine.GetLastCommitIndex(context, out index, out long term);
                     }
 
-                    server.ServerStore.Engine.RemoveEntryFromRaftLog(index + 1);
+                    var res = await WaitForValueAsync(() => server.ServerStore.Engine.RemoveEntryFromRaftLog(index + 1), true);
+
+                    Assert.True(res);
                 }
 
                 long index2 = 0;
@@ -223,17 +229,18 @@ namespace SlowTests.Issues
                         using (var tx = context.OpenReadTransaction())
                         {
                             server.ServerStore.Engine.GetLastCommitIndex(context, out index2, out long term);
+
                         }
 
                         return index2 > index;
                     }, true);
                 }
-                Assert.True(index2 > index,$"State machine is stuck. raft index was {index}, after remove raft entry index is {index2} ");
+                Assert.True(index2 > index, $"State machine is stuck. raft index was {index}, after remove raft entry index is {index2} ");
 
                 foreach (var server in Servers)
                 {
-                    var val = WaitForValueAsync(() => server.ServerStore.DatabasesLandlord.IsDatabaseLoaded("Toli"), true);
-                    Assert.True(val.Result);
+                    var val = await WaitForValueAsync(() => server.ServerStore.DatabasesLandlord.IsDatabaseLoaded("Toli"), true);
+                    Assert.True(val);
                 }
             }
         }

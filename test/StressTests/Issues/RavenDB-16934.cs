@@ -8,7 +8,7 @@ using Raven.Server.Config;
 using Tests.Infrastructure;
 using Xunit.Abstractions;
 
-namespace SlowTests.Issues
+namespace StressTests.Issues
 {
     public class RavenDB_16934 : RavenTestBase
     {
@@ -16,7 +16,7 @@ namespace SlowTests.Issues
         {
         }
 
-        [Fact64Bit]
+        [MultiplatformFact(RavenArchitecture.AllX64)]
         public async Task Should_Delete_All_Documents_Without_Timeout()
         {
             using (var store = GetDocumentStore(new Options
@@ -43,13 +43,19 @@ namespace SlowTests.Issues
                     }
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 var operation = await store.Operations.SendAsync(
                     new DeleteByQueryOperation<SearchIndex.Result, SearchIndex>(x =>
                         x.DateTime < now));
 
-                await operation.WaitForCompletionAsync(TimeSpan.FromMinutes(5));
+#if DEBUG
+                var timeout = TimeSpan.FromMinutes(10);
+#else
+                var timeout = TimeSpan.FromMinutes(5);
+#endif
+
+                await operation.WaitForCompletionAsync(timeout);
             }
         }
 
@@ -68,10 +74,10 @@ namespace SlowTests.Issues
             public SearchIndex()
             {
                 Map = units => from unit in units
-                    select new Result
-                    {
-                        DateTime = unit.DateTime
-                    };
+                               select new Result
+                               {
+                                   DateTime = unit.DateTime
+                               };
             }
         }
     }

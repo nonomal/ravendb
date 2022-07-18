@@ -123,7 +123,7 @@ namespace Raven.Server.Documents.Handlers.Admin
             return Task.CompletedTask;
         }
 
-        [RavenAction("/admin/cluster/observer/decisions", "GET", AuthorizationStatus.Operator, CorsMode = CorsMode.Cluster)]
+        [RavenAction("/admin/cluster/observer/decisions", "GET", AuthorizationStatus.Operator, CorsMode = CorsMode.Cluster, IsDebugInformationEndpoint = true)]
         public async Task GetObserverDecisions()
         {
             if (ServerStore.IsLeader())
@@ -148,10 +148,10 @@ namespace Raven.Server.Documents.Handlers.Admin
             RedirectToLeader();
         }
 
-        [RavenAction("/admin/cluster/log", "GET", AuthorizationStatus.Operator)]
+        [RavenAction("/admin/cluster/log", "GET", AuthorizationStatus.Operator, IsDebugInformationEndpoint = true)]
         public async Task GetLogs()
         {
-            using (ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext context))
+            using (ServerStore.Engine.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
             await using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
             {
                 context.OpenReadTransaction();
@@ -430,6 +430,7 @@ namespace Raven.Server.Documents.Handlers.Admin
                                     Thumbprint = certificate.Thumbprint,
                                     PublicKeyPinningHash = certificate.GetPublicKeyPinningHash(),
                                     NotAfter = certificate.NotAfter,
+                                    NotBefore = certificate.NotBefore,
                                     Name = "Server Certificate for " + nodeUrl,
                                     SecurityClearance = SecurityClearance.ClusterNode
                                 };

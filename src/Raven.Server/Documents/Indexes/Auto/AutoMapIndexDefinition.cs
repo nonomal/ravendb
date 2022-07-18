@@ -10,7 +10,7 @@ using Voron;
 
 namespace Raven.Server.Documents.Indexes.Auto
 {
-    public class AutoMapIndexDefinition : AutoIndexDefinitionBase
+    public class AutoMapIndexDefinition : AutoIndexDefinitionBaseServerSide
     {
         public AutoMapIndexDefinition(string collection, AutoIndexField[] fields, IndexDeploymentMode? deploymentMode, long? indexVersion = null)
             : base(AutoIndexNameFinder.FindMapIndexName(collection, fields), collection, fields, deploymentMode, indexVersion)
@@ -63,7 +63,7 @@ namespace Raven.Server.Documents.Indexes.Auto
             return indexDefinition;
         }
 
-        public override IndexDefinitionCompareDifferences Compare(IndexDefinitionBase other)
+        public override IndexDefinitionCompareDifferences Compare(IndexDefinitionBaseServerSide other)
         {
             var otherDefinition = other as AutoMapIndexDefinition;
             if (otherDefinition == null)
@@ -135,13 +135,15 @@ namespace Raven.Server.Documents.Indexes.Auto
                 json.TryGet(nameof(AutoIndexField.Name), out string name);
                 json.TryGet(nameof(AutoIndexField.Indexing), out string indexing);
                 json.TryGet(nameof(AutoIndexField.HasSuggestions), out bool hasSuggestions);
+                json.TryGet(nameof(AutoIndexField.HasQuotedName), out bool hasQuotedName);
 
                 var field = new AutoIndexField
                 {
                     Name = name,
                     Storage = FieldStorage.No,
                     Indexing = (AutoFieldIndexing)Enum.Parse(typeof(AutoFieldIndexing), indexing),
-                    HasSuggestions = hasSuggestions
+                    HasSuggestions = hasSuggestions,
+                    HasQuotedName = hasQuotedName
                 };
 
                 fields[i] = field;

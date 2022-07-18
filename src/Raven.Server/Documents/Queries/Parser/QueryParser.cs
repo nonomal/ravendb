@@ -169,6 +169,13 @@ namespace Raven.Server.Documents.Queries.Parser
 
             if (Scanner.TryScan("LOAD"))
                 query.Load = SelectClauseExpressions("LOAD", false);
+            
+                
+            if (Scanner.TryScan("FILTER") && Expression(out query.Filter) == false)
+            {
+                message = "Unable to parse FILTER clause";
+                return false;
+            }
 
             switch (queryType)
             {
@@ -216,7 +223,17 @@ namespace Raven.Server.Documents.Queries.Parser
                     break;
             }
 
-            Paging(out query.Offset, out query.Limit);
+            Paging(out query.Offset, out query.Limit, out query.FilterLimit);
+            if (queryType == QueryType.Select &&
+                Scanner.TryScan("INCLUDE"))
+            {
+                if (query.Include != null)
+                {
+                    message = "Query already has an include statement, but encountered a second one";
+                    return false;
+                }
+                query.Include = IncludeClause();
+            }
 
             if (recursive == false && Scanner.AtEndOfInput() == false)
             {
@@ -258,10 +275,11 @@ namespace Raven.Server.Documents.Queries.Parser
         }
 
 
-        private void Paging(out ValueExpression offset, out ValueExpression limit)
+        private void Paging(out ValueExpression offset, out ValueExpression limit, out ValueExpression filterLimit)
         {
             offset = null;
             limit = null;
+            filterLimit = null;
 
             if (Scanner.TryScan("LIMIT"))
             {
@@ -291,6 +309,12 @@ namespace Raven.Server.Documents.Queries.Parser
                     ThrowInvalidQueryException("Offset must contain a value");
 
                 offset = second;
+            }
+
+            if (Scanner.TryScan("FILTER_LIMIT"))
+            {
+                if (Value(out filterLimit) == false)
+                    ThrowInvalidQueryException("FILTER_LIMIT must contain a value");
             }
         }
 
@@ -388,7 +412,6 @@ namespace Raven.Server.Documents.Queries.Parser
             // Lines where Name = 'Chang' select Product
 
             isImplicit = false;
-            SynteticWithQuery prev = default;
             alias = default;
             field = null;
             var start = Scanner.Position;
@@ -462,7 +485,7 @@ namespace Raven.Server.Documents.Queries.Parser
                     if (gq.HasAlias(alias))
                         return true;
 
-                    if (_synteticWithQueries?.TryGetValue(alias, out prev) == true && !prev.IsEdge)
+                    if (_synteticWithQueries?.TryGetValue(alias, out SynteticWithQuery prev) == true && !prev.IsEdge)
                         return true;
 
                     AddWithQuery(collection, null, alias, null, isEdge, start, true);
@@ -1838,8 +1861,21 @@ Grouping by 'Tag' or Field is supported only as a second grouping-argument.";
                 return false;
             }
 
+            var oldPos = Scanner.Position;
             if (Field(out var token))
             {
+                if (required == false && // need to check that this is a real alias 
+                    token.FieldValue.Equals("FILTER", StringComparison.OrdinalIgnoreCase))
+                {
+                    // if the alias is 'filter' *and* the next term is *not* a keyword, we have a filter clause so not an alias 
+                    if (Scanner.TryPeek(AliasKeywords) == false)
+                    {
+                        Scanner.Reset(oldPos);
+                        alias = null;
+                        return false;
+                    }
+                }
+
                 alias = token.FieldValue;
                 return true;
             }

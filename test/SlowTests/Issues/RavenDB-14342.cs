@@ -35,6 +35,8 @@ namespace SlowTests.Issues
         [LicenseRequiredFact]
         public void ServerMonitoringTest()
         {
+            DoNotReuseServer();
+        
             using (var store = GetDocumentStore())
             {
                 store.Maintenance.Send(new CreateSampleDataOperation(DatabaseItemType.Documents | DatabaseItemType.Indexes));
@@ -54,7 +56,9 @@ namespace SlowTests.Issues
                     using (var currentProcess = Process.GetCurrentProcess())
                     {
                         Assert.Equal(currentProcess.Id, metrics.ServerProcessId);
+#pragma warning disable CA1416 // Validate platform compatibility
                         Assert.Equal((int)Bits.NumberOfSetBits(currentProcess.ProcessorAffinity.ToInt64()), metrics.Cpu.AssignedProcessorCount);
+#pragma warning restore CA1416 // Validate platform compatibility
                     }
                     
                     Assert.Equal(Server.ServerStore.ConcurrentBackupsCounter.MaxNumberOfConcurrentBackups, metrics.Backup.MaxNumberOfConcurrentBackups);
@@ -89,10 +93,11 @@ namespace SlowTests.Issues
         [LicenseRequiredFact]
         public async Task DatabasesMonitoringTest()
         {
+            DoNotReuseServer();
             using (var store = GetDocumentStore())
             {
                 await store.Maintenance.SendAsync(new CreateSampleDataOperation(DatabaseItemType.Documents | DatabaseItemType.Indexes | DatabaseItemType.RevisionDocuments | DatabaseItemType.Attachments));
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
                 await store.Maintenance.SendAsync(new DisableIndexOperation("Orders/ByCompany"));
 
                 using (var session = store.OpenSession())
@@ -104,7 +109,7 @@ namespace SlowTests.Issues
                     Assert.True(query.Count > 0);
                 }
                 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
                 
                 using (var commands = store.Commands())
                 {
@@ -155,11 +160,12 @@ namespace SlowTests.Issues
         [LicenseRequiredFact]
         public async Task IndexesMonitoringTest()
         {
+            DoNotReuseServer();
             using (var store = GetDocumentStore())
             {
                 await store.Maintenance.SendAsync(new CreateSampleDataOperation(DatabaseItemType.Documents | DatabaseItemType.Indexes |
                                                                                 DatabaseItemType.RevisionDocuments | DatabaseItemType.Attachments));
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
                 await store.Maintenance.SendAsync(new DisableIndexOperation("Orders/ByCompany"));
 
                 using (var session = store.OpenSession())
@@ -171,7 +177,7 @@ namespace SlowTests.Issues
                     Assert.True(query.Count > 0);
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var commands = store.Commands())
                 {
@@ -205,6 +211,7 @@ namespace SlowTests.Issues
         [LicenseRequiredFact]
         public async Task CollectionsMonitoringTest()
         {
+            DoNotReuseServer();
             using (var store = GetDocumentStore())
             {
                 await store.Maintenance.SendAsync(new CreateSampleDataOperation(DatabaseItemType.Documents | DatabaseItemType.RevisionDocuments));

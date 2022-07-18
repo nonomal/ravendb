@@ -6,6 +6,7 @@ using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
+using Sparrow;
 using Sparrow.Logging;
 using Sparrow.Server.Meters;
 using Sparrow.Server.Platform;
@@ -16,6 +17,7 @@ using Voron.Impl;
 using Voron.Impl.Paging;
 using Voron.Util.Settings;
 using static Voron.Platform.Win32.Win32NativeMethods;
+using NativeMemory = Sparrow.Utils.NativeMemory;
 
 namespace Voron.Platform.Win32
 {
@@ -251,7 +253,7 @@ namespace Voron.Platform.Win32
             {
                 var innerException = new Win32Exception(Marshal.GetLastWin32Error(), "Failed to MapView of file " + FileName);
 
-                var errorMessage = $"Unable to allocate more pages - unsuccessfully tried to allocate continuous block of virtual memory with size = {(_fileStream.Length):##,###;;0} bytes";
+                var errorMessage = $"Unable to allocate more pages - unsuccessfully tried to allocate continuous block of virtual memory with size = {new Size(_fileStream.Length, SizeUnit.Bytes)}";
 
                 throw new OutOfMemoryException(errorMessage, innerException);
             }

@@ -97,23 +97,26 @@ namespace Raven.Server.Documents.Handlers.Streaming
             using (ContextPool.AllocateOperationContext(out DocumentsOperationContext context))
             using (context.OpenReadTransaction())
             {
-                var reader = new TimeSeriesReader(context, documentId, name, from, to, offset);
-
+                using (var token = CreateOperationToken())
                 await using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
                 {
+                    var reader = new TimeSeriesReader(context, documentId, name, from, to, offset, token.Token);
+
                     writer.WriteStartObject();
                     writer.WritePropertyName("Results");
                     writer.WriteStartArray();
+                    
                     foreach (var entry in reader.AllValues())
                     {
                         context.Write(writer, entry.ToTimeSeriesEntryJson());
                         writer.WriteComma();
-                        await writer.MaybeFlushAsync(Database.DatabaseShutdown);
+                        await writer.MaybeFlushAsync(token.Token);
                     }
+
                     writer.WriteEndArray();
                     writer.WriteEndObject();
 
-                    await writer.MaybeFlushAsync(Database.DatabaseShutdown);
+                    await writer.MaybeFlushAsync(token.Token);
                 }
             }
         }
@@ -155,6 +158,7 @@ namespace Raven.Server.Documents.Handlers.Streaming
 
                 var format = GetStringQueryString("format", false);
                 var debug = GetStringQueryString("debug", false);
+                var ignoreLimit = GetBoolValueQueryString("ignoreLimit", required: false) ?? false;
                 var properties = GetStringValuesQueryString("field", false);
                 var propertiesArray = properties.Count == 0 ? null : properties.ToArray();
                 // set the exported file name prefix
@@ -168,7 +172,7 @@ namespace Raven.Server.Documents.Handlers.Streaming
                         {
                             try
                             {
-                                await Database.QueryRunner.ExecuteStreamIndexEntriesQuery(query, queryContext, HttpContext.Response, writer, token).ConfigureAwait(false);
+                                await Database.QueryRunner.ExecuteStreamIndexEntriesQuery(query, queryContext, HttpContext.Response, writer, ignoreLimit, token).ConfigureAwait(false);
                             }
                             catch (IndexDoesNotExistException)
                             {
@@ -242,6 +246,7 @@ namespace Raven.Server.Documents.Handlers.Streaming
 
                 var format = GetStringQueryString("format", false);
                 var debug = GetStringQueryString("debug", false);
+                var ignoreLimit = GetBoolValueQueryString("ignoreLimit", required: false) ?? false;
                 var properties = GetStringValuesQueryString("field", false);
                 var propertiesArray = properties.Count == 0 ? null : properties.ToArray();
 
@@ -256,7 +261,7 @@ namespace Raven.Server.Documents.Handlers.Streaming
                         {
                             try
                             {
-                                await Database.QueryRunner.ExecuteStreamIndexEntriesQuery(query, queryContext, HttpContext.Response, writer, token).ConfigureAwait(false);
+                                await Database.QueryRunner.ExecuteStreamIndexEntriesQuery(query, queryContext, HttpContext.Response, writer, ignoreLimit, token).ConfigureAwait(false);
                             }
                             catch (IndexDoesNotExistException)
                             {

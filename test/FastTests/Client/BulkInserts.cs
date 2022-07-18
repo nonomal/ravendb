@@ -34,9 +34,9 @@ namespace FastTests.Client
             X509Certificate2 adminCertificate = null;
             if (useSsl)
             {
-                var certificates = SetupServerAuthentication();
-                adminCertificate = RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
-                clientCertificate = RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>
+                var certificates = Certificates.SetupServerAuthentication();
+                adminCertificate = Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+                clientCertificate = Certificates.RegisterClientCertificate(certificates.ServerCertificate.Value, certificates.ClientCertificate2.Value, new Dictionary<string, DatabaseAccess>
                 {
                     [dbName] = DatabaseAccess.ReadWrite
                 });
@@ -46,7 +46,12 @@ namespace FastTests.Client
             {
                 AdminCertificate = adminCertificate,
                 ClientCertificate = clientCertificate,
-                ModifyDatabaseName = s => dbName
+                ModifyDatabaseName = s => dbName,
+                ModifyDocumentStore = s =>
+                {
+                    if (useSsl)
+                        s.OnFailedRequest += (_, args) => Console.WriteLine($"Failed Request ('{args.Database}'): {args.Url}. Exception: {args.Exception}");
+                }
             }))
             {
                 using (var bulkInsert = store.BulkInsert())
@@ -132,7 +137,7 @@ namespace FastTests.Client
         }
 
         [Fact]
-        public void Bulk_Insert_Should_Throw_On_StoreAsync_Concurrent_Calls()
+        public async Task Bulk_Insert_Should_Throw_On_StoreAsync_Concurrent_Calls()
         {
             using (var store = GetDocumentStore())
             {
@@ -147,15 +152,9 @@ namespace FastTests.Client
                         };
                     }
 
+                    var e = await Assert.ThrowsAsync<InvalidOperationException>(async () => { await Parallel.ForEachAsync(localList, async (element, _) => { await bulkInsert.StoreAsync(element); }); });
 
-                    var ae = Assert.Throws<AggregateException>(() => { Parallel.ForEach(localList, element => { bulkInsert.StoreAsync(element).Wait(); }); });
-
-
-                    var msg = ae.InnerExceptions
-                        .OfType<AggregateException>()
-                        .SelectMany(x => x.InnerExceptions)
-                        .OfType<InvalidOperationException>().First().Message;
-                    Assert.Contains("Bulk Insert store methods cannot be executed concurrently", msg);
+                    Assert.Contains("Bulk Insert store methods cannot be executed concurrently", e.Message);
                 }
             }
         }

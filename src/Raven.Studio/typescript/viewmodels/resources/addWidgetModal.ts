@@ -8,54 +8,64 @@ interface widgetToAdd {
 
 class addWidgetModal extends dialogViewModelBase {
 
+    view = require("views/resources/addWidgetModal.html");
+    
     private readonly existingTypes: widgetType[];
     private readonly onWidgetSelected: (type: widgetType) => void;
     
     widgets: widgetToAdd[] = [
         {
             name: "Welcome Screen",
-            type: "Welcome",
-            icon: "welcome-icon"
+            icon: require("../../../wwwroot/Content/img/widgets/welcome-icon.svg"),
+            type: "Welcome"
         }, {
             name: "License info",
-            type: "License",
-            icon: "text-icon"
+            icon: require("../../../wwwroot/Content/img/widgets/text-icon.svg"),
+            type: "License"
+        }, {
+            name: "Cluster Overview",
+            icon: require("../../../wwwroot/Content/img/widgets/chart-icon.svg"),
+            type: "ClusterOverview"            
+        }, {
+            name: "Storage",
+            icon: require("../../../wwwroot/Content/img/widgets/chart-icon.svg"),
+            type: "StorageUsage"
         }, {
             name: "CPU",
-            icon: "graph-icon",
+            icon: require("../../../wwwroot/Content/img/widgets/graph-icon.svg"),
             type: "CpuUsage"
         }, {
             name: "Memory",
-            icon: "graph-icon",
+            icon: require("../../../wwwroot/Content/img/widgets/graph-icon.svg"),
             type: "MemoryUsage"
         }, {
             name: "Indexing",
-            icon: "graph-icon",
+            icon: require("../../../wwwroot/Content/img/widgets/graph-icon.svg"),
             type: "Indexing"
         }, {
-            name: "Indexing per Database",
-            icon: "list-icon",
-            type: "DatabaseIndexing"
-        }, {
             name: "Traffic",
-            icon: "list-icon",
+            icon: require("../../../wwwroot/Content/img/widgets/list-icon.svg"),
             type: "Traffic"
         }, {
+            name: "Indexing per Database",
+            icon: require("../../../wwwroot/Content/img/widgets/list-icon.svg"),
+            type: "DatabaseIndexing"
+        }, {
             name: "Traffic per Database",
-            icon: "list-icon",
+            icon: require("../../../wwwroot/Content/img/widgets/list-icon.svg"),
             type: "DatabaseTraffic"
         }, {
-            name: "Storage",
-            icon: "chart-icon",
-            type: "StorageUsage"
-        }, {
             name: "Storage per Database",
-            icon: "list-icon",
+            icon: require("../../../wwwroot/Content/img/widgets/list-icon.svg"),
             type: "DatabaseStorageUsage"
         }, {
             name: "Database Overview",
-            icon: "list-icon",
+            icon: require("../../../wwwroot/Content/img/widgets/list-icon.svg"),
             type: "DatabaseOverview"
+        }, {
+            name: "Ongoing Tasks",
+            icon: require("../../../wwwroot/Content/img/widgets/list-icon.svg"),
+            type: "OngoingTasks"
         }
     ]
     

@@ -12,6 +12,7 @@ using Sparrow.Utils;
 using Voron.Data.BTrees;
 using Voron.Data.Fixed;
 using Voron.Data.RawData;
+using Voron.Debugging;
 using Voron.Exceptions;
 using Voron.Impl;
 using Voron.Impl.Paging;
@@ -51,7 +52,7 @@ namespace Voron.Data.Tables
         {
             get
             {
-                return _currentCompressionDictionaryId ??= 
+                return _currentCompressionDictionaryId ??=
                     _tableTree.ReadInt32(TableSchema.CurrentCompressionDictionaryIdSlice) ?? 0;
             }
             set
@@ -232,7 +233,7 @@ namespace Voron.Data.Tables
         {
             if (_tx.CachedDecompressedBuffersByStorageId.Remove(id, out var t))
             {
-               _tx.Allocator.Release(ref t);
+                _tx.Allocator.Release(ref t);
             }
         }
 
@@ -255,14 +256,14 @@ namespace Voron.Data.Tables
         }
 
         internal static ByteStringContext<ByteStringMemoryCache>.InternalScope DecompressValue(
-            Transaction tx, 
+            Transaction tx,
             byte* ptr, int size, out ByteString buffer)
         {
-            var dicId = BlittableJsonReaderBase.ReadVariableSizeIntInReverse(ptr, size-1, out var offset);
+            var dicId = BlittableJsonReaderBase.ReadVariableSizeIntInReverse(ptr, size - 1, out var offset);
             var data = new ReadOnlySpan<byte>(ptr, size - offset);
             var dictionary = tx.LowLevelTransaction.Environment.CompressionDictionariesHolder
                 .GetCompressionDictionaryFor(tx, dicId);
-    
+
             int decompressedSize = ZstdLib.GetDecompressedSize(data);
             var internalScope = tx.Allocator.Allocate(decompressedSize, out buffer);
             var actualSize = ZstdLib.Decompress(data, buffer.ToSpan(), dictionary);
@@ -530,7 +531,7 @@ namespace Voron.Data.Tables
 
                 // avoiding try / finally or using here for perf reasons
                 // if we get an error, it will get cleaned up by the context anyway
-                decompressedScope.Dispose(); 
+                decompressedScope.Dispose();
             }
 
             ActiveDataSmallSection.DeleteSection(sectionPageNumber);
@@ -601,7 +602,7 @@ namespace Voron.Data.Tables
         public long Insert(TableValueBuilder builder)
         {
             AssertWritableTable();
-            
+
             if (_schema.Compressed
                 // we may have tried compressing in the update, so no need to repeat it
                 && builder.CompressionTried == false)
@@ -672,7 +673,7 @@ namespace Voron.Data.Tables
         {
             InactiveSections.Add(_activeDataSmallSection.PageNumber);
 
-            if (TryFindMatchFromCandidateSections(itemSize, out long id)) 
+            if (TryFindMatchFromCandidateSections(itemSize, out long id))
                 return id;
 
             CreateNewActiveSection();
@@ -686,13 +687,13 @@ namespace Voron.Data.Tables
         private void ThrowBadWriter(int size, long id, bool compressed)
         {
             throw new VoronErrorException(
-                $"After successfully allocating {size:#,#;;0} bytes (id: {id} compressed: {compressed}), failed to write them on {Name}");
+                $"After successfully allocating {new Size(size, SizeUnit.Bytes)} bytes (id: {id} compressed: {compressed}), failed to write them on {Name}");
         }
 
         private void ThrowBadAllocation(int size)
         {
             throw new VoronErrorException(
-                $"After changing active sections, failed to allocate {size:#,#;;0} bytes on {Name}");
+                $"After changing active sections, failed to allocate {new Size(size, SizeUnit.Bytes)} bytes on {Name}");
         }
 
         public class CompressionDictionariesHolder : IDisposable
@@ -702,9 +703,6 @@ namespace Voron.Data.Tables
             public ZstdLib.CompressionDictionary GetCompressionDictionaryFor(Transaction tx, int id)
             {
                 if (_compressionDictionaries.TryGetValue(id, out var current))
-                    return current;
-
-                if (_compressionDictionaries.TryGetValue(id, out current))
                     return current;
 
                 current = CreateCompressionDictionary(tx, id);
@@ -750,6 +748,13 @@ namespace Voron.Data.Tables
                     dic.Dispose();
 
                 }
+            }
+
+            public void Remove(int id)
+            {
+                // Intentionally orphaning the dictionary here, we'll let the 
+                // GC's finalizer to clear it up, this is a *very* rare operation.
+                _compressionDictionaries.TryRemove(id, out _);
             }
         }
 
@@ -2032,10 +2037,12 @@ namespace Voron.Data.Tables
             _tableTree?.Dispose();
         }
 
-        public TableReport GetReport(bool includeDetails)
+        public TableReport GetReport(bool includeDetails, StorageReportGenerator generatorInstance = null)
         {
+            generatorInstance ??= new StorageReportGenerator(_tx.LowLevelTransaction);
+
             var overflowSize = _overflowPageCount * Constants.Storage.PageSize;
-            var report = new TableReport(overflowSize, overflowSize, includeDetails)
+            var report = new TableReport(overflowSize, overflowSize, includeDetails, generatorInstance)
             {
                 Name = Name.ToString(),
                 NumberOfEntries = NumberOfEntries
@@ -2073,7 +2080,7 @@ namespace Voron.Data.Tables
             var inactiveSections = InactiveSections;
             report.AddStructure(inactiveSections, includeDetails);
 
-            foreach(var section in new []{inactiveSections, activeCandidateSection})
+            foreach (var section in new[] { inactiveSections, activeCandidateSection })
             {
                 using (var it = section.Iterate())
                 {

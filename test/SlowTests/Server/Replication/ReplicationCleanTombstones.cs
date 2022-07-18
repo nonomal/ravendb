@@ -132,7 +132,7 @@ namespace SlowTests.Server.Replication
                 Assert.Equal(3, total);
 
                 await Backup.RunBackupInClusterAsync(store, result.TaskId, isFullBackup: true);
-                await ActionWithLeader(async x => await WaitForRaftCommandToBeAppliedInCluster(x, nameof(UpdatePeriodicBackupStatusCommand)), cluster.Nodes);
+                await ActionWithLeader(async x => await Cluster.WaitForRaftCommandToBeAppliedInClusterAsync(x, nameof(UpdatePeriodicBackupStatusCommand)), cluster.Nodes);
 
                 var res = await WaitForValueAsync(async () =>
                 {
@@ -286,7 +286,7 @@ namespace SlowTests.Server.Replication
                     Assert.True(await WaitForDocumentInClusterAsync<User>(cluster.Nodes, external, "marker2", (m) => m.Id == "marker2", TimeSpan.FromSeconds(15)));
                 }
 
-                await ActionWithLeader(async x => await WaitForRaftCommandToBeAppliedInCluster(x, nameof(UpdateExternalReplicationStateCommand)), cluster.Nodes);
+                await ActionWithLeader(async x => await Cluster.WaitForRaftCommandToBeAppliedInClusterAsync(x, nameof(UpdateExternalReplicationStateCommand)), cluster.Nodes);
                 var res = await WaitForValueAsync(async () =>
                 {
                     var c = 0L;
@@ -414,7 +414,9 @@ namespace SlowTests.Server.Replication
                     session.SaveChanges();
                 }
 
-                WaitForDocument(dest, "marker2");
+                var res = WaitForDocument(dest, "marker2");
+                Assert.True(res);
+
                 string changeVectorMarker2;
 
                 using (var session = dest.OpenSession())
@@ -427,23 +429,27 @@ namespace SlowTests.Server.Replication
                     changeVectorMarker2 = session.Advanced.GetChangeVectorFor(marker);
                 }
 
-                await ActionWithLeader((l) => WaitForRaftCommandToBeAppliedInCluster(l, nameof(UpdateEtlProcessStateCommand)));
+                await ActionWithLeader((l) => Cluster.WaitForRaftCommandToBeAppliedInClusterAsync(l, nameof(UpdateEtlProcessStateCommand)));
                 Assert.True(await WaitForEtlState(cluster, store, changeVectorMarker2));
 
-                total = 0;
                 foreach (var server in cluster.Nodes)
                 {
                     if (server.Disposed)
                         continue;
                     var storage = await server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(store.Database);
-                    await storage.TombstoneCleaner.ExecuteCleanup();
+                    var cleanerRes = await storage.TombstoneCleaner.ExecuteCleanup();
                     using (storage.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext context))
-                    using (context.OpenReadTransaction())
                     {
-                        total += storage.DocumentsStorage.GetNumberOfTombstones(context);
+                        var val = await WaitForValueAsync(() =>
+                        {
+                            using (context.OpenReadTransaction())
+                            {
+                                return storage.DocumentsStorage.GetNumberOfTombstones(context);
+                            }
+                        }, 0);
+                        Assert.True(0 == val, $"TombstoneCleaner result = {cleanerRes},");
                     }
                 }
-                Assert.Equal(0, total);
             }
         }
 
@@ -818,7 +824,7 @@ namespace SlowTests.Server.Replication
                     Assert.Equal(1, stats.CountOfDocuments); // the marker
                     Assert.Equal(2, stats.CountOfTombstones);
 
-                    var storage = await GetDocumentDatabaseInstanceFor(store);
+                    var storage = await Databases.GetDocumentDatabaseInstanceFor(store);
                     using (storage.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext ctx))
                     using (ctx.OpenReadTransaction())
                     {

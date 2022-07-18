@@ -17,7 +17,11 @@ import databaseIndexingWidget = require("viewmodels/resources/widgets/databaseIn
 import databaseStorageWidget = require("viewmodels/resources/widgets/databaseStorageWidget");
 import databaseTrafficWidget = require("viewmodels/resources/widgets/databaseTrafficWidget");
 import databaseOverviewWidget = require("viewmodels/resources/widgets/databaseOverviewWidget");
+import ongoingTasksWidget = require("viewmodels/resources/widgets/ongoingTasksWidget");
+import clusterOverviewWidget = require("viewmodels/resources/widgets/clusterOverviewWidget");
 import storageKeyProvider = require("common/storage/storageKeyProvider");
+import Packery = require("packery");
+import Draggabilly = require("draggabilly");
 
 interface savedWidgetsLayout {
     widgets: savedWidget[];
@@ -34,11 +38,13 @@ interface savedWidget {
 
 class clusterDashboard extends viewModelBase {
 
+    view = require("views/resources/clusterDashboard.html");
+
     static localStorageName = storageKeyProvider.storageKeyFor("clusterDashboardLayout");
     
     private static readonly nodeColors = ["#2f9ef3", "#945ab5", "#f06582", "#f0b362", "#7bd85d", "#7069ee", "#d85b9a", "#f38a66", "#edcd51", "#37c4ac"];
     
-    private packery: PackeryStatic;
+    private packery: Packery;
     resizeObserver: ResizeObserver;
     initialized = ko.observable<boolean>(false);
     readonly currentServerNodeTag: string;
@@ -70,7 +76,7 @@ class clusterDashboard extends viewModelBase {
     }
     
     private initPackery() {
-        this.packery = new Packery( ".masonry-grid", {
+        this.packery = new Packery(".masonry-grid", { 
             itemSelector: ".cluster-dashboard-item",
             percentPosition: true,
             initialLayout: false,
@@ -244,6 +250,8 @@ class clusterDashboard extends viewModelBase {
             this.addWidget(new databaseStorageWidget(this));
             this.addWidget(new welcomeWidget(this));
             this.addWidget(new databaseOverviewWidget(this));
+            this.addWidget(new ongoingTasksWidget(this));
+            this.addWidget(new clusterOverviewWidget(this));
             
             const initialWidgets = this.widgets();
             
@@ -417,6 +425,12 @@ class clusterDashboard extends viewModelBase {
                 break;
             case "DatabaseOverview":
                 widget = new databaseOverviewWidget(this);
+                break;
+            case "OngoingTasks":
+                widget = new ongoingTasksWidget(this);
+                break;
+            case "ClusterOverview":
+                widget = new clusterOverviewWidget(this);
                 break;
             default:
                 throw new Error("Unsupported widget type = " + type);

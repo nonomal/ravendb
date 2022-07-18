@@ -16,6 +16,10 @@ import discoveryUrl = require("models/database/settings/discoveryUrl");
 
 class editExternalReplicationTask extends viewModelBase {
 
+    view = require("views/database/tasks/editExternalReplicationTask.html");
+    connectionStringView = require("views/database/settings/connectionStringRaven.html");
+    certificateUploadInfoForOngoingTasks = require("views/partial/certificateUploadInfoForOngoingTasks.html");
+
     editedExternalReplication = ko.observable<ongoingTaskReplicationEditModel>();
     isAddingNewReplicationTask = ko.observable<boolean>(true);
     private taskId: number = null;
@@ -24,6 +28,8 @@ class editExternalReplicationTask extends viewModelBase {
     
     ravenEtlConnectionStringsDetails = ko.observableArray<Raven.Client.Documents.Operations.ETL.RavenConnectionString>([]);
 
+    usingHttps = location.protocol === "https:";
+    certificatesUrl = appUrl.forCertificates();
     connectionStringsUrl = appUrl.forCurrentDatabase().connectionStrings();
 
     testConnectionResult = ko.observable<Raven.Server.Web.System.NodeConnectionTestResult>();

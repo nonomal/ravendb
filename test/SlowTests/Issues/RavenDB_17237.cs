@@ -31,7 +31,7 @@ namespace SlowTests.Issues
 
                 await indexDef.ExecuteAsync(store);
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 var database = await GetDatabase(store.Database);
 
@@ -44,7 +44,7 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 Assert.Equal(TimeSpan.FromSeconds(1), index._mre.ThrottlingInterval);
                 Assert.NotNull(index._mre._timerTask);
@@ -63,16 +63,15 @@ namespace SlowTests.Issues
 
                 var replacementIndex = database.IndexStore.GetIndex(Constants.Documents.Indexing.SideBySideIndexNamePrefix + updatedIndexDef.IndexName);
 
-                using (replacementIndex.ForTestingPurposesOnly().CallDuringFinallyOfExecuteIndexing(() =>
+                using (index.ForTestingPurposesOnly().CallDuringFinallyOfExecuteIndexing(() =>
                 {
                     // stop the current index for a moment to ensure that a new thread will start - the one after renaming the replacement index
                     Thread.Sleep(2000);
                 }))
                 {
                     store.Maintenance.Send(new StartIndexingOperation());
+                    Indexes.WaitForIndexing(store);
                 }
-
-                WaitForIndexing(store);
 
                 Assert.NotNull(replacementIndex._mre._timerTask);
                 Assert.False(replacementIndex._mre.Wait(100, CancellationToken.None));
@@ -84,7 +83,7 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
             }
         }
 

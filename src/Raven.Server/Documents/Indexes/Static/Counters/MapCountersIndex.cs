@@ -203,7 +203,7 @@ namespace Raven.Server.Documents.Indexes.Static.Counters
 
         public static Index CreateNew(IndexDefinition definition, DocumentDatabase documentDatabase)
         {
-            var instance = CreateIndexInstance(definition, documentDatabase.Configuration, IndexDefinitionBase.IndexVersion.CurrentVersion);
+            var instance = CreateIndexInstance(definition, documentDatabase.Configuration, IndexDefinitionBaseServerSide.IndexVersion.CurrentVersion);
             instance.Initialize(documentDatabase,
                 new SingleIndexConfiguration(definition.Configuration, documentDatabase.Configuration),
                 documentDatabase.Configuration.PerformanceHints);
@@ -225,7 +225,7 @@ namespace Raven.Server.Documents.Indexes.Static.Counters
 
         private static MapCountersIndex CreateIndexInstance(IndexDefinition definition, RavenConfiguration configuration, long indexVersion)
         {
-            var staticIndex = IndexCompilationCache.GetIndexInstance(definition, configuration);
+            var staticIndex = IndexCompilationCache.GetIndexInstance(definition, configuration, indexVersion);
 
             var staticMapIndexDefinition = new MapIndexDefinition(definition, staticIndex.Maps.Keys, staticIndex.OutputFields, staticIndex.HasDynamicFields, staticIndex.CollectionsWithCompareExchangeReferences.Count > 0, indexVersion);
             var instance = new MapCountersIndex(staticMapIndexDefinition, staticIndex);
@@ -255,6 +255,28 @@ namespace Raven.Server.Documents.Indexes.Static.Counters
                 DocumentDatabase.DocumentsStorage.CountersStorage.GetNumberOfCounterGroupsToProcess(
                     queryContext.Documents, collectionName, progressStats.LastProcessedItemEtag, out var totalNumberOfItems);
             progressStats.TotalNumberOfItems += totalNumberOfItems;
+        }
+
+        public override Dictionary<string, long> GetLastProcessedTombstonesPerCollection(ITombstoneAware.TombstoneType tombstoneType)
+        {
+            if (tombstoneType == ITombstoneAware.TombstoneType.Documents)
+            {
+                using (CurrentlyInUse())
+                {
+                    return StaticIndexHelper.GetLastProcessedDocumentTombstonesPerCollection(
+                        this, _referencedCollections, Collections, _compiled.ReferencedCollections, _indexStorage);
+                }
+            }
+
+            if (tombstoneType == ITombstoneAware.TombstoneType.Counters)
+            {
+                using (CurrentlyInUse())
+                {
+                    return StaticIndexHelper.GetLastProcessedEtagsPerCollection(this, Collections, _indexStorage);
+                }
+            }
+
+            return null;
         }
     }
 }

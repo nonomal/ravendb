@@ -45,7 +45,7 @@ namespace SlowTests.Issues
 
                 GenerateTestClaims(store, numberOfClaimsToGenerate);
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 while (true)
                 {
@@ -68,15 +68,12 @@ namespace SlowTests.Issues
                         claimSession.SaveChanges();
                     }
 
-                    WaitForIndexing(store);
+                    Indexes.WaitForIndexing(store);
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var errors = store.Maintenance.Send(new GetIndexErrorsOperation());
-
-                var anyError = errors.Any(x => x.Errors.Any());
-                Assert.False(anyError);
+                Assert.Null(Indexes.WaitForIndexingErrors(store, errorsShouldExists: false));
 
                 using (var session = store.OpenSession())
                 {
@@ -96,7 +93,7 @@ namespace SlowTests.Issues
                 var operation = store.Operations.Send(new DeleteByQueryOperation(new IndexQuery { Query = "FROM Claims" }));
                 operation.WaitForCompletion(TimeSpan.FromSeconds(60));
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 using (var session = store.OpenSession())
                 {

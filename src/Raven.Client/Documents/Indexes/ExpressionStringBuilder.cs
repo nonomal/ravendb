@@ -1324,8 +1324,25 @@ namespace Raven.Client.Documents.Indexes
                         return node; // we don't have nullable type on the server side, we can safely ignore this.
                 }
             }
-
             var exprType = node.Expression != null ? node.Member.DeclaringType : node.Type;
+#if FEATURE_DATEONLY_TIMEONLY_SUPPORT
+            if (_isProjectionPart && (node.Type == typeof(TimeOnly) || node.Type == typeof(DateOnly) || node.Type == typeof(TimeOnly?) || node.Type == typeof(DateOnly?)))
+            {
+                if (Nullable.GetUnderlyingType(node.Type) is Type underlyingType)
+                {
+                    Out($"As{underlyingType.Name}(");
+                }
+                else
+                {
+                    Out($"As{node.Type.Name}(");
+                }
+
+                
+                OutMember(node.Expression, node.Member, exprType);
+                Out(")");
+                return node;
+            }
+#endif
             OutMember(node.Expression, node.Member, exprType);
             return node;
         }
@@ -1376,7 +1393,7 @@ namespace Raven.Client.Documents.Indexes
                 Out("new");
             }
             else
-            {
+            { 
                 Visit(node.NewExpression);
                 if (TypeExistsOnServer(node.Type) == false)
                 {
@@ -1474,7 +1491,7 @@ namespace Raven.Client.Documents.Indexes
                         Out("dynamic, ");
                     }
                     Out("dynamic>)(");
-                    if (methodInfo.Name == nameof(AbstractIndexCreationTask.LoadDocument))
+                    if (methodInfo.Name == nameof(ILoadCommonApiForIndexes.LoadDocument))
                     {
                         var type = methodInfo.GetGenericArguments()[0];
 
@@ -1602,6 +1619,11 @@ namespace Raven.Client.Documents.Indexes
                         // exists on both the server side and the client side
                         Out("this");
                     }
+                    else if (typeof(NoTrackingCommonApiForIndexes).IsAssignableFrom(expression.Type))
+                    {
+                        Out("this.");
+                        Out(nameof(AbstractCommonApiForIndexes.NoTracking));
+                    }
                     else if (isDictionaryObject)
                     {
                         Visit(expression);
@@ -1667,11 +1689,11 @@ namespace Raven.Client.Documents.Indexes
                         }
                         Out("Where");
                         break;
-                    case nameof(AbstractIndexCreationTask.LoadDocument):
-                        Out(nameof(AbstractIndexCreationTask.LoadDocument));
+                    case nameof(ILoadCommonApiForIndexes.LoadDocument):
+                        Out(nameof(ILoadCommonApiForIndexes.LoadDocument));
                         break;
-                    case nameof(AbstractIndexCreationTask.LoadCompareExchangeValue):
-                        Out(nameof(AbstractIndexCreationTask.LoadCompareExchangeValue));
+                    case nameof(ILoadCompareExchangeApiForIndexes.LoadCompareExchangeValue):
+                        Out(nameof(ILoadCompareExchangeApiForIndexes.LoadCompareExchangeValue));
                         break;
                     default:
                         Out(node.Method.Name);
@@ -1709,10 +1731,13 @@ namespace Raven.Client.Documents.Indexes
 
                     var oldAvoidDuplicateParameters = _avoidDuplicatedParameters;
                     var oldIsSelectMany = _isSelectMany;
-
+                    var oldIsProjectionPart = _isProjectionPart;
                     _isSelectMany = node.Method.Name == "SelectMany";
                     if (node.Method.Name == "Select" || _isSelectMany)
+                    {
                         _avoidDuplicatedParameters = true;
+                        _isProjectionPart = true;
+                    }
 
                     if (node.Arguments[num2].NodeType == ExpressionType.MemberAccess)
                     {
@@ -1734,6 +1759,7 @@ namespace Raven.Client.Documents.Indexes
 
                     _isSelectMany = oldIsSelectMany;
                     _avoidDuplicatedParameters = oldAvoidDuplicateParameters;
+                    _isProjectionPart = oldIsProjectionPart;
                 }
                 finally
                 {
@@ -1752,7 +1778,7 @@ namespace Raven.Client.Documents.Indexes
                 Out("\", StringComparison.Ordinal)");
             }
 
-            if (node.Method.Name == nameof(AbstractIndexCreationTask.LoadDocument))
+            if (node.Method.Name == nameof(ILoadCommonApiForIndexes.LoadDocument))
             {
                 var type = node.Method.GetGenericArguments()[0];
                 _loadDocumentTypes.Add(type);
@@ -1770,11 +1796,11 @@ namespace Raven.Client.Documents.Indexes
 
                     var argument = node.Arguments[1];
                     if (argument.NodeType != ExpressionType.Constant)
-                        throw new InvalidOperationException($"Invalid argument in {nameof(AbstractIndexCreationTask.LoadDocument)}. String constant was expected but was '{argument.NodeType}' with value '{argument}'.");
+                        throw new InvalidOperationException($"Invalid argument in {nameof(ILoadCommonApiForIndexes.LoadDocument)}. String constant was expected but was '{argument.NodeType}' with value '{argument}'.");
                 }
                 else
                 {
-                    throw new NotSupportedException($"Unknown overload of {nameof(AbstractIndexCreationTask.LoadDocument)} method");
+                    throw new NotSupportedException($"Unknown overload of {nameof(ILoadCommonApiForIndexes.LoadDocument)} method");
                 }
             }
 
@@ -2165,6 +2191,7 @@ namespace Raven.Client.Documents.Indexes
         private bool _insideWellKnownType;
         private bool _avoidDuplicatedParameters;
         private bool _isSelectMany;
+        private bool _isProjectionPart;
         private readonly HashSet<Type> _loadDocumentTypes = new HashSet<Type>();
 
         /// <summary>

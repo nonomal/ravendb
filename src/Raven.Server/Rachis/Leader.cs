@@ -6,12 +6,14 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Raven.Client.Exceptions.Cluster;
 using Raven.Client.Extensions;
 using Raven.Client.Http;
 using Raven.Client.ServerWide;
 using Raven.Server.NotificationCenter.Notifications;
 using Raven.Server.NotificationCenter.Notifications.Details;
 using Raven.Server.Rachis.Remote;
+using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Commands;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
@@ -37,6 +39,7 @@ namespace Raven.Server.Rachis
         public delegate object ConvertResultFromLeader(JsonOperationContext ctx, object result);
 
         private TaskCompletionSource<object> _newEntriesArrived = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<object> _errorOccurred = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private readonly ConcurrentDictionary<long, CommandState> _entries = new ConcurrentDictionary<long, CommandState>();
 
@@ -80,6 +83,7 @@ namespace Raven.Server.Rachis
         {
             Term = term;
             _engine = engine;
+            PeersVersion[engine.Tag] = ClusterCommandsVersionManager.MyCommandsVersion;
         }
 
         private MultipleUseFlag _running = new MultipleUseFlag();
@@ -96,6 +100,8 @@ namespace Raven.Server.Rachis
                 clusterTopology = _engine.GetTopology(context);
             }
 
+            _engine.ForTestingPurposes?.LeaderLock?.LockLeaderThread();
+
             RefreshAmbassadors(clusterTopology, connections);
 
             _leaderLongRunningWork =
@@ -104,13 +110,19 @@ namespace Raven.Server.Rachis
 
         private int _steppedDown;
 
-        public void StepDown()
+        public void StepDown(bool forceElection = true)
         {
             if (_voters.Count == 0)
                 throw new InvalidOperationException("Cannot step down when I'm the only voter in the cluster");
 
             if (Interlocked.CompareExchange(ref _steppedDown, 1, 0) == 1)
                 return;
+
+            if (forceElection == false)
+            {
+                _errorOccurred.TrySetException(new NotLeadingException("Was forced to step down"));
+                return;
+            }
 
             var nextLeader = _voters.Values.OrderByDescending(x => x.FollowerMatchIndex).ThenByDescending(x => x.LastReplyFromFollower).First();
             if (_engine.Log.IsInfoEnabled)
@@ -163,17 +175,11 @@ namespace Raven.Server.Rachis
                     {
                         _engine.Log.Info($"{ToString()}: Skipping refreshing ambassadors because we are been disposed of");
                     }
-                    return;
+
+                    throw new ObjectDisposedException($"{ToString()} is being disposed.");
                 }
 
-                if (Term != _engine.CurrentTerm)
-                {
-                    if (_engine.Log.IsInfoEnabled)
-                    {
-                        _engine.Log.Info($"{ToString()}: We are no longer the actual leader, since the current term is {_engine.CurrentTerm}");
-                    }
-                    return;
-                }
+                _engine.ValidateTerm(Term);
 
                 if (_engine.Log.IsInfoEnabled)
                 {
@@ -295,7 +301,8 @@ namespace Raven.Server.Rachis
                     _newEntry,
                     _voterResponded,
                     _promotableUpdated,
-                    _shutdownRequested
+                    _shutdownRequested,
+                    ((IAsyncResult)_errorOccurred.Task).AsyncWaitHandle
                 };
 
                 _newEntry.Set(); //This is so the noop would register right away
@@ -327,6 +334,9 @@ namespace Raven.Server.Rachis
                             }
                             _running.Lower();
                             return;
+                        case 4: // an error occurred during EmptyQueue()
+                            _errorOccurred.Task.Wait();
+                            break;
                     }
 
                     EnsureThatWeHaveLeadership(VotersMajority);
@@ -356,16 +366,18 @@ namespace Raven.Server.Rachis
             }
             catch (Exception e)
             {
+                const string msg = "Error when running leader behavior";
+
                 if (_engine.Log.IsInfoEnabled)
                 {
-                    _engine.Log.Info("Error when running leader behavior", e);
+                    _engine.Log.Info(msg, e);
                 }
 
                 if (e is VoronErrorException)
                 {
                     _engine.Notify(AlertRaised.Create(
                         null,
-                        "Error when running leader behavior",
+                        msg,
                         e.Message,
                         AlertType.ClusterTopologyWarning,
                         NotificationSeverity.Error, details: new ExceptionDetails(e)));
@@ -452,8 +464,13 @@ namespace Raven.Server.Rachis
 
             bool changedFromLeaderElectToLeader;
             using (_engine.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
-            using (context.OpenWriteTransaction())
+            using (var tx = context.OpenWriteTransaction())
             {
+                if (_engine.ForTestingPurposes?.LeaderLock != null)
+                    tx.InnerTransaction.LowLevelTransaction.OnDispose += _ => _engine.ForTestingPurposes?.LeaderLock?.Complete();
+
+                _engine.ValidateTerm(Term);
+
                 _lastCommit = _engine.GetLastCommitIndex(context);
 
                 if (_lastCommit >= maxIndexOnQuorum ||
@@ -465,12 +482,18 @@ namespace Raven.Server.Rachis
 
                 changedFromLeaderElectToLeader = _engine.TakeOffice();
 
-                maxIndexOnQuorum = _engine.Apply(context, maxIndexOnQuorum, this, Stopwatch.StartNew());
+                var sp = Stopwatch.StartNew();
+                maxIndexOnQuorum = _engine.Apply(context, maxIndexOnQuorum, this, sp);
 
                 context.Transaction.Commit();
+
+                var elapsed = sp.Elapsed;
+                if (RachisStateMachine.EnableDebugLongCommit && elapsed > TimeSpan.FromSeconds(5))
+                    Console.WriteLine($"Commiting from {_lastCommit} to {maxIndexOnQuorum} took {elapsed}");
+
                 _lastCommit = maxIndexOnQuorum;
             }
-
+            
             foreach (var kvp in _entries)
             {
                 if (kvp.Key > _lastCommit)
@@ -548,17 +571,17 @@ namespace Raven.Server.Rachis
 
             foreach (var voter in _voters.Values)
             {
-                lowestIndex = Math.Min(lowestIndex, voter.FollowerMatchIndex);
+                lowestIndex = Math.Min(lowestIndex, voter.FollowerLastCommitIndex);
             }
 
             foreach (var promotable in _promotables.Values)
             {
-                lowestIndex = Math.Min(lowestIndex, promotable.FollowerMatchIndex);
+                lowestIndex = Math.Min(lowestIndex, promotable.FollowerLastCommitIndex);
             }
 
             foreach (var nonVoter in _nonVoters.Values)
             {
-                lowestIndex = Math.Min(lowestIndex, nonVoter.FollowerMatchIndex);
+                lowestIndex = Math.Min(lowestIndex, nonVoter.FollowerLastCommitIndex);
             }
 
             return lowestIndex;
@@ -680,7 +703,8 @@ namespace Raven.Server.Rachis
         {
             var list = new List<TaskCompletionSource<Task<(long, object)>>>();
             var tasks = new List<Task<(long, object)>>();
-            var lostLeadershipException = new NotLeadingException("We are no longer the leader, this leader is disposed");
+            const string leaderDisposedMessage = "We are no longer the leader, this leader is disposed";
+            var lostLeadershipException = new NotLeadingException(leaderDisposedMessage);
 
             using (_engine.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
             {
@@ -774,24 +798,42 @@ namespace Raven.Server.Rachis
                 {
                     if (_running.IsRaised() == false)
                     {
-                        e = new NotLeadingException("We are no longer the leader, this leader is disposed", e);
+                        e = new NotLeadingException(leaderDisposedMessage, e);
                     }
                     foreach (var tcs in list)
                     {
                         tcs.TrySetException(e);
                     }
+
+                    _errorOccurred.TrySetException(e);
                 }
             }
         }
 
         internal static ConvertResultAction GetConvertResult(CommandBase cmd)
         {
+            ConvertResultAction action;
             switch (cmd)
             {
                 case AddOrUpdateCompareExchangeBatchCommand batchCmpExchangeCommand:
-                    return new ConvertResultAction(batchCmpExchangeCommand.ContextToWriteResult, CompareExchangeCommandBase.ConvertResult);
+                    action = batchCmpExchangeCommand.ConvertResultAction;
+                    if (action != null)
+                        return action;
+
+                    action = new ConvertResultAction(batchCmpExchangeCommand.ContextToWriteResult, CompareExchangeCommandBase.ConvertResult);
+                    Interlocked.CompareExchange(ref batchCmpExchangeCommand.ConvertResultAction, action, null);
+                    return batchCmpExchangeCommand.ConvertResultAction;
+
                 case CompareExchangeCommandBase cmpExchange:
-                    return new ConvertResultAction(cmpExchange.ContextToWriteResult, CompareExchangeCommandBase.ConvertResult);
+
+                    action = cmpExchange.ConvertResultAction;
+                    if (action != null)
+                        return action;
+
+                    action = new ConvertResultAction(cmpExchange.ContextToWriteResult, CompareExchangeCommandBase.ConvertResult);
+                    Interlocked.CompareExchange(ref cmpExchange.ConvertResultAction, action, null);
+                    return cmpExchange.ConvertResultAction;
+
                 default:
                     return null;
             }
@@ -823,13 +865,14 @@ namespace Raven.Server.Rachis
 
         public void Dispose()
         {
-
             using (_disposerLock.StartDisposing())
             {
                 bool lockTaken = false;
                 Monitor.TryEnter(this, TimeSpan.FromSeconds(15), ref lockTaken);
                 try
                 {
+                    _engine.ForTestingPurposes?.LeaderLock?.HangThreadIfLocked();
+
                     if (lockTaken == false)
                     {
                         var message = $"{ToString()}: Refresh ambassador is taking the lock for 15 sec giving up on leader dispose";
@@ -848,6 +891,7 @@ namespace Raven.Server.Rachis
                     TaskExecutor.Execute(_ =>
                     {
                         _newEntriesArrived.TrySetCanceled();
+                        _errorOccurred.TrySetCanceled();
                         var lastStateChangeReason = _engine.LastStateChangeReason;
                         NotLeadingException te = null;
                         if (string.IsNullOrEmpty(lastStateChangeReason) == false)

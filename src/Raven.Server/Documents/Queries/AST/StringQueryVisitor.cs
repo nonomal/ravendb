@@ -33,7 +33,7 @@ namespace Raven.Server.Documents.Queries.AST
         {
             EnsureLine();
             _sb.Append("UPDATE { ");
-            _sb.AppendLine(update.Value);
+            _sb.AppendLine(update.Value.Trim('{', '}'));
             _sb.AppendLine("}");
         }
 
@@ -41,7 +41,7 @@ namespace Raven.Server.Documents.Queries.AST
         {
             EnsureLine();
             _sb.AppendLine("SELECT { ");
-            _sb.AppendLine(func.Value);
+            _sb.AppendLine(func.Value.Trim('{', '}'));
             _sb.AppendLine("}");
         }
 
@@ -120,6 +120,14 @@ namespace Raven.Server.Documents.Queries.AST
         {
             EnsureSpace();
             _sb.Append("WHERE ");
+            base.VisitWhereClause(where);
+            _sb.AppendLine();
+        }
+        
+        public override void VisitFilterClause(QueryExpression where)
+        {
+            EnsureSpace();
+            _sb.Append("FILTER ");
             base.VisitWhereClause(where);
             _sb.AppendLine();
         }
@@ -348,6 +356,13 @@ namespace Raven.Server.Documents.Queries.AST
                 VisitExpression(filter);
                 
                 _sb.Append(")");
+            }
+
+            if (alias != null)
+            {
+                EnsureSpace();
+
+                _sb.Append("AS ").Append(alias);
             }
         }
 

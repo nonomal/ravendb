@@ -31,17 +31,15 @@ namespace SlowTests.Voron.Bugs
                     store.Operations.Send(new PatchByQueryOperation(new IndexQuery { Query = @"FROM Orders UPDATE { put(""orders/"", this); } " })).WaitForCompletion(TimeSpan.FromSeconds(60));
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 Server.ServerStore.DatabasesLandlord.UnloadDirectly(store.Database);
 
                 store.Operations.Send(new PatchByQueryOperation(new IndexQuery { Query = @"FROM Orders UPDATE { put(""orders/"", this); } " })).WaitForCompletion(TimeSpan.FromSeconds(60));
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var errors = store.Maintenance.ForDatabase(store.Database).Send(new GetIndexErrorsOperation());
-
-                Assert.Empty(errors.SelectMany(x => x.Errors));
+                Assert.Null(Indexes.WaitForIndexingErrors(store, errorsShouldExists: false));
             }
         }
 

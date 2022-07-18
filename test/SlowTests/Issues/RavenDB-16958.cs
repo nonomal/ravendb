@@ -29,7 +29,7 @@ namespace SlowTests.Issues
 
         private RavenServer CreateSecuredServer(string fakePublicUrl = null, bool uniqueCerts = false)
         {
-            var certificates = GenerateAndSaveSelfSignedCertificate(createNew: uniqueCerts);
+            var certificates = Certificates.GenerateAndSaveSelfSignedCertificate(createNew: uniqueCerts);
             var customSettings = new ConcurrentDictionary<string, string>();
 
             if (customSettings.TryGetValue(RavenConfiguration.GetKey(x => x.Security.CertificateLoadExec), out var _) == false)
@@ -254,7 +254,7 @@ namespace SlowTests.Issues
                 using (var handler = RequestExecutor.CreateHttpMessageHandler(serverA.Certificate.Certificate, true, true))
                 using (var client = new HttpClient(handler))
                 {
-                    var url = Uri.EscapeUriString($"{serverA.WebUrl}/admin/debug/node/ping?url={serverB.WebUrl}");
+                    var url = $"{serverA.WebUrl}/admin/debug/node/ping?url={Uri.EscapeDataString(serverB.WebUrl)}";
                     var rawResponse = (await client.GetAsync(url)).Content.ReadAsStringAsync().Result;
                     var res = JsonConvert.DeserializeObject<HttpPingResult>(rawResponse);
                     Assert.NotNull(res);

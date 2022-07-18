@@ -10,6 +10,8 @@ import databaseOverviewItem = require("models/resources/widgets/databaseOverview
 
 class databaseOverviewWidget extends abstractDatabaseAndNodeAwareTableWidget<Raven.Server.Dashboard.Cluster.Notifications.DatabaseOverviewPayload,
     perNodeStatItems<databaseOverviewItem>, databaseOverviewItem> {
+
+    view = require("views/resources/widgets/databaseOverviewWidget.html");
     
     getType(): Raven.Server.Dashboard.Cluster.ClusterDashboardNotificationType {
         return "DatabaseOverview";
@@ -85,6 +87,8 @@ class databaseOverviewWidget extends abstractDatabaseAndNodeAwareTableWidget<Rav
             new textColumn<databaseOverviewItem>(grid, x => x.nodeTag ? "" : x.ongoingTasks.toLocaleString(), "Ongoing Tasks", "10%"),
 
             new iconsPlusTextColumn<databaseOverviewItem>(grid, x => x.nodeTag ? "" : x.backupDataForHtml(), "Backups", "10%"),
+
+            new iconsPlusTextColumn<databaseOverviewItem>(grid, x => x.stateDataForHtml(x.nodeTag), "State", "10%")
         ];
     }
 

@@ -21,6 +21,7 @@ import accessManager = require("common/shell/accessManager");
 import driveUsageDetails = require("models/resources/serverDashboard/driveUsageDetails");
 import viewHelpers = require("common/helpers/view/viewHelpers");
 import timeHelpers = require("common/timeHelpers");
+import moment = require("moment");
 
 class machineResourcesSection {
 
@@ -726,6 +727,8 @@ class driveUsageSection {
 
 class serverDashboard extends viewModelBase {
     
+    view = require("views/resources/serverDashboard.html");
+    
     static readonly dateFormat = generalUtils.dateFormat;
     static readonly timeFormat = "h:mm:ss A";
     liveClient = ko.observable<serverDashboardWebSocketClient>();
@@ -752,6 +755,7 @@ class serverDashboard extends viewModelBase {
     node: KnockoutComputed<clusterNode>;
     sizeFormatter = generalUtils.formatBytesToSize;
 
+    isSecureServer = accessManager.default.secureServer();
     usingHttps = location.protocol === "https:";
 
     certificatesUrl = appUrl.forCertificates();

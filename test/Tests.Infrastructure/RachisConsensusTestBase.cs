@@ -1,14 +1,16 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
+using System.Linq; 
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using FastTests;
 using Raven.Client.ServerWide;
 using Raven.Client.ServerWide.Tcp;
 using Raven.Client.Util;
@@ -16,6 +18,7 @@ using Raven.Server;
 using Raven.Server.Config;
 using Raven.Server.Config.Settings;
 using Raven.Server.Rachis;
+using Raven.Server.Rachis.Remote;
 using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Commands;
 using Raven.Server.ServerWide.Context;
@@ -27,8 +30,11 @@ using Sparrow.Server.Platform;
 using Sparrow.Utils;
 using Voron;
 using Voron.Data;
+using Voron.Data.BTrees;
+using Voron.Exceptions;
 using Xunit;
 using Xunit.Abstractions;
+using NativeMemory = Sparrow.Utils.NativeMemory;
 
 namespace Tests.Infrastructure
 {
@@ -42,6 +48,9 @@ namespace Tests.Infrastructure
             XunitLogging.EnableExceptionCapture();
 
             NativeMemory.GetCurrentUnmanagedThreadId = () => (ulong)Pal.rvn_get_current_thread_id();
+            ZstdLib.CreateDictionaryException = message => new VoronErrorException(message);
+            RachisStateMachine.EnableDebugLongCommit = true;
+
             Lucene.Net.Util.UnmanagedStringArray.Segment.AllocateMemory = NativeMemory.AllocateMemory;
             Lucene.Net.Util.UnmanagedStringArray.Segment.FreeMemory = NativeMemory.Free;
             JsonDeserializationCluster.Commands.Add(nameof(TestCommand), JsonDeserializationBase.GenerateJsonDeserializationRoutine<TestCommand>());
@@ -77,7 +86,7 @@ namespace Tests.Infrastructure
                 }
                 var follower = RachisConsensuses[i + initialCount];
                 await leader.AddToClusterAsync(follower.Url);
-                var done = await follower.WaitForTopology(Leader.TopologyModification.Voter).WaitAsync(timeout);
+                var done = await follower.WaitForTopology(Leader.TopologyModification.Voter).WaitWithoutExceptionAsync(timeout);
                 Assert.True(done, "Waited for node to become a follower for too long");
             }
             var currentState = RachisConsensuses[leaderIndex + initialCount].CurrentState;
@@ -143,8 +152,23 @@ namespace Tests.Infrastructure
             {
                 waitingTasks.Add(node.WaitForState(RachisState.Leader, CancellationToken.None));
             }
-            Assert.True(Task.WhenAny(waitingTasks).Wait(3000 * nodes.Count()), "Waited too long for a node to become a leader but no leader was elected.");
+
+            RavenTestHelper.AssertTrue(Task.WhenAny(waitingTasks).Wait(3000 * nodes.Count()), () => GetCandidateStatus(nodes));
             return nodes.FirstOrDefault(x => x.CurrentState == RachisState.Leader);
+        }
+
+        public static string GetCandidateStatus(IEnumerable<RachisConsensus<CountingStateMachine>> nodes)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Waited too long for a node to become a leader but no leader was elected.");
+            foreach (var node in nodes)
+            {
+                sb.AppendLine($"'{node.Tag}' is {node.CurrentState} at term {node.CurrentTerm} (running: {node.Candidate.Running})");
+                sb.AppendJoin(Environment.NewLine, node.Candidate.GetStatus().Values);
+                sb.AppendLine();
+            }
+
+            return sb.ToString();
         }
 
         protected RachisConsensus<CountingStateMachine> SetupServer(bool bootstrap = false, int port = 0, int electionTimeout = 300, [CallerMemberName] string caller = null)
@@ -189,59 +213,69 @@ namespace Tests.Infrastructure
             rachis.Url = url;
             _listeners.Add(tcpListener);
             RachisConsensuses.Add(rachis);
-            var task = AcceptConnection(tcpListener, rachis);
+            rachis.OnDispose += (sender, args) => tcpListener.Stop();
+
+            for (int i = 0; i < 4; i++)
+            {
+                AcceptConnection(tcpListener, rachis);
+            }
+
             return rachis;
         }
 
-        private async Task AcceptConnection(TcpListener tcpListener, RachisConsensus rachis)
+        private void AcceptConnection(TcpListener tcpListener, RachisConsensus rachis)
         {
-            rachis.OnDispose += (sender, args) => tcpListener.Stop();
-
-            while (true)
+            Task.Factory.StartNew(async () =>
             {
                 TcpClient tcpClient;
                 try
                 {
                     tcpClient = await tcpListener.AcceptTcpClientAsync();
+                    AcceptConnection(tcpListener, rachis);
                 }
-                catch (InvalidOperationException)
+                catch (Exception e)
                 {
-                    break;
+                    if (rachis.IsDisposed)
+                        return;
+
+                    Assert.True(false, $"Unexpected TCP listener exception{Environment.NewLine}{e}");
+                    throw;
                 }
 
-#pragma warning disable 4014
-                Task.Factory.StartNew(() =>
-#pragma warning restore 4014
+                try
                 {
-                    try
-                    {
-                        var stream = tcpClient.GetStream();
-                        rachis.AcceptNewConnection(stream, () => tcpClient.Client.Disconnect(false), tcpClient.Client.RemoteEndPoint, hello =>
+                    var stream = tcpClient.GetStream();
+                    var remoteConnection = new RemoteConnection(rachis.Tag, rachis.CurrentTerm, stream,
+                        features: new TcpConnectionHeaderMessage.SupportedFeatures.ClusterFeatures
                         {
-                            if (rachis.Url == null)
-                                return;
+                            MultiTree = true
+                        }, () => tcpClient.Client.Disconnect(false));
 
-                            lock (this)
-                            {
-                                if (_rejectionList.TryGetValue(rachis.Url, out var set))
-                                {
-                                    if (set.Contains(hello.DebugSourceIdentifier))
-                                    {
-                                        throw new InvalidComObjectException("Simulated failure");
-                                    }
-                                }
-
-                                var connections = _connections.GetOrAdd(rachis.Url, _ => new ConcurrentSet<Tuple<string, TcpClient>>());
-                                connections.Add(Tuple.Create(hello.DebugSourceIdentifier, tcpClient));
-                            }
-                        });
-                    }
-                    catch
+                    rachis.AcceptNewConnection(remoteConnection, tcpClient.Client.RemoteEndPoint, hello =>
                     {
-                        // expected
-                    }
-                });
-            }
+                        if (rachis.Url == null)
+                            return;
+
+                        lock (this)
+                        {
+                            if (_rejectionList.TryGetValue(rachis.Url, out var set))
+                            {
+                                if (set.Contains(hello.DebugSourceIdentifier))
+                                {
+                                    throw new InvalidComObjectException("Simulated failure");
+                                }
+                            }
+
+                            var connections = _connections.GetOrAdd(rachis.Url, _ => new ConcurrentSet<Tuple<string, TcpClient>>());
+                            connections.Add(Tuple.Create(hello.DebugSourceIdentifier, tcpClient));
+                        }
+                    });
+                }
+                catch
+                {
+                    // expected
+                }
+            });
         }
 
         protected void Disconnect(string to, string from)
@@ -318,7 +352,7 @@ namespace Tests.Infrastructure
             return waitingList;
         }
 
-        protected async Task<Task> ActionWithLeader(Func<RachisConsensus<CountingStateMachine>, Task> action)
+        protected async Task ActionWithLeader(Func<RachisConsensus<CountingStateMachine>, Task> action)
         {
             var retires = 5;
             Exception lastException;
@@ -332,7 +366,8 @@ namespace Tests.Infrastructure
                         var tasks = RachisConsensuses.Select(x => x.WaitForState(RachisState.Leader, cts.Token));
                         await Task.WhenAny(tasks);
                         var leader = RachisConsensuses.Single(x => x.CurrentState == RachisState.Leader);
-                        return action(leader);
+                        await action(leader);
+                        return;
                     }
                 }
                 catch (Exception e)
@@ -421,8 +456,9 @@ namespace Tests.Infrastructure
                 using (ContextPoolForReadOnlyOperations.AllocateOperationContext(out ClusterOperationContext ctx))
                 using (ctx.OpenReadTransaction())
                 {
-                    time = _parent.ElectionTimeout * (_parent.GetTopology(ctx).AllNodes.Count - 2);
+                    time = _parent.ElectionTimeout * Math.Max(_parent.GetTopology(ctx).AllNodes.Count - 2, 1);
                 }
+
                 var tcpClient = await TcpUtils.ConnectAsync(url, time, token: token);
                 try
                 {
@@ -430,7 +466,8 @@ namespace Tests.Infrastructure
                     var conn = new RachisConnection
                     {
                         Stream = stream,
-                        SupportedFeatures = new TcpConnectionHeaderMessage.SupportedFeatures(TcpConnectionHeaderMessage.NoneBaseLine),
+                        SupportedFeatures = TcpConnectionHeaderMessage.GetSupportedFeaturesFor(
+                            TcpConnectionHeaderMessage.OperationTypes.Cluster, TcpConnectionHeaderMessage.ClusterWithMultiTree),
                         Disconnect = () =>
                         {
                             using (tcpClient)
@@ -479,7 +516,7 @@ namespace Tests.Infrastructure
             public TestCommandWithRaftId(string name, string uniqueRequestId) : base(uniqueRequestId)
             {
                 Name = name;
-    }
+            }
 
             public override DynamicJsonValue ToJson(JsonOperationContext context)
             {
@@ -488,7 +525,7 @@ namespace Tests.Infrastructure
                 djv[nameof(Value)] = Value;
 
                 return djv;
-}
+            }
         }
     }
 }

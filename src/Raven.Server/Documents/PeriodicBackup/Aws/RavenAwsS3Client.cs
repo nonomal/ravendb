@@ -11,7 +11,6 @@ using Amazon.S3;
 using Amazon.S3.Model;
 using Raven.Client.Documents.Operations.Backups;
 using Raven.Client.Util;
-using Raven.Server.Config.Categories;
 using Raven.Server.Documents.PeriodicBackup.Restore;
 using Sparrow;
 using Size = Sparrow.Size;
@@ -24,12 +23,13 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
         private readonly CancellationToken _cancellationToken;
         internal Size MaxUploadPutObject = new Size(256, SizeUnit.Megabytes);
         internal Size MinOnePartUploadSizeLimit = new Size(100, SizeUnit.Megabytes);
+        internal readonly AmazonS3Config Config;
 
         private static readonly Size TotalBlocksSizeLimit = new Size(5, SizeUnit.Terabytes);
 
         private AmazonS3Client _client;
         private readonly string _bucketName;
-
+        private readonly bool _usingCustomServerUrl;
         public readonly string RemoteFolderName;
 
         public readonly string Region;
@@ -38,7 +38,7 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
         {
             if (s3Settings == null)
                 throw new ArgumentNullException(nameof(s3Settings));
-            if (configuration == null) 
+            if (configuration == null)
                 throw new ArgumentNullException(nameof(configuration));
 
             if (string.IsNullOrWhiteSpace(s3Settings.AwsAccessKey))
@@ -50,23 +50,37 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
             if (string.IsNullOrWhiteSpace(s3Settings.BucketName))
                 throw new ArgumentException("AWS Bucket Name cannot be null or empty");
 
-            var config = new AmazonS3Config
-            {
-                Timeout = configuration.CloudStorageOperationTimeout.AsTimeSpan
-            };
+            AmazonS3Config config;
 
             if (string.IsNullOrWhiteSpace(s3Settings.CustomServerUrl))
             {
                 if (string.IsNullOrWhiteSpace(s3Settings.AwsRegionName))
                     throw new ArgumentException("AWS Region Name cannot be null or empty");
 
-                config.RegionEndpoint = RegionEndpoint.GetBySystemName(s3Settings.AwsRegionName);
+                config = new AmazonS3Config
+                {
+                    RegionEndpoint = RegionEndpoint.GetBySystemName(s3Settings.AwsRegionName)
+                };
             }
             else
             {
-                config.UseHttp = true;
-                config.ServiceURL = s3Settings.CustomServerUrl;
+                _usingCustomServerUrl = true;
+
+                config = new CustomS3Config(s3Settings.CustomServerUrl)
+                {
+                    ForcePathStyle = s3Settings.ForcePathStyle,
+                    UseHttp = true
+                };
+
+                if (string.IsNullOrWhiteSpace(s3Settings.AwsRegionName) == false)
+                {
+                    // region for custom server url isn't mandatory
+                    config.RegionEndpoint = RegionEndpoint.GetBySystemName(s3Settings.AwsRegionName);
+                }
             }
+
+            config.Timeout = configuration.CloudStorageOperationTimeout.AsTimeSpan;
+            Config = config;
 
             AWSCredentials credentials;
             if (string.IsNullOrWhiteSpace(s3Settings.AwsSessionToken))
@@ -75,6 +89,7 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
                 credentials = new SessionAWSCredentials(s3Settings.AwsAccessKey, s3Settings.AwsSecretKey, s3Settings.AwsSessionToken);
 
             _client = new AmazonS3Client(credentials, config);
+
             _bucketName = s3Settings.BucketName;
             RemoteFolderName = s3Settings.RemoteFolderName;
             Region = s3Settings.AwsRegionName == null ? string.Empty : s3Settings.AwsRegionName.ToLower();
@@ -310,12 +325,7 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
             }
         }
 
-        public void TestConnection()
-        {
-            AsyncHelpers.RunSync(TestConnectionAsync);
-        }
-
-        private async Task TestConnectionAsync()
+        public async Task TestConnectionAsync()
         {
             await AssertBucketLocationAsync();
 
@@ -330,31 +340,39 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
 
         private async Task AssertBucketPermissionsAsync()
         {
-            var aclResponse = await _client.GetACLAsync(_bucketName, _cancellationToken);
-            var permissions = aclResponse
-                .AccessControlList
-                .Grants
-                .Select(x => x.Permission.Value)
-                .ToHashSet();
-
-            if (permissions.Contains("FULL_CONTROL") == false && permissions.Contains("WRITE"))
+            using (var cancellationToken = new CancellationTokenSource(5000))
+            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken.Token, _cancellationToken))
             {
-                throw new InvalidOperationException(
-                    $"Can't create an object in bucket '{_bucketName}', " +
-                    $"when permission is set to '{string.Join(", ", permissions)}'");
+                var aclResponse = await _client.GetACLAsync(_bucketName, cts.Token);
+                var permissions = aclResponse
+                    .AccessControlList
+                    .Grants
+                    .Select(x => x.Permission.Value)
+                    .ToHashSet();
+
+                if (permissions.Contains("FULL_CONTROL") == false && permissions.Contains("WRITE"))
+                {
+                    throw new InvalidOperationException(
+                        $"Can't create an object in bucket '{_bucketName}', " +
+                        $"when permission is set to '{string.Join(", ", permissions)}'");
+                }
             }
         }
 
         private async Task AssertBucketLocationAsync()
         {
-            var bucketLocationResponse = await _client.GetBucketLocationAsync(_bucketName, _cancellationToken);
-            var bucketLocation = bucketLocationResponse.Location.Value;
-            if (string.IsNullOrEmpty(bucketLocation))
-                bucketLocation = "us-east-1";
-
-            if (bucketLocation.Equals(Region, StringComparison.OrdinalIgnoreCase) == false)
+            using (var cancellationToken = new CancellationTokenSource(5000))
+            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken.Token, _cancellationToken))
             {
-                throw new InvalidOperationException($"AWS location is set to '{Region}', but the bucket named: '{_bucketName}' is located in: {bucketLocation}");
+                var bucketLocationResponse = await _client.GetBucketLocationAsync(_bucketName, cts.Token);
+                var bucketLocation = bucketLocationResponse.Location.Value;
+                if (_usingCustomServerUrl == false && string.IsNullOrEmpty(bucketLocation))
+                    bucketLocation = "us-east-1"; // relevant only for AWS
+
+                if (bucketLocation.Equals(Region, StringComparison.OrdinalIgnoreCase) == false)
+                {
+                    throw new InvalidOperationException($"AWS location is set to '{Region}', but the bucket named: '{_bucketName}' is located in: {bucketLocation}");
+                }
             }
         }
 
@@ -364,7 +382,7 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
                 return;
 
             foreach (var kvp in metadata)
-                collection[kvp.Key] = kvp.Value;
+                collection[Uri.EscapeDataString(kvp.Key)] = Uri.EscapeDataString(kvp.Value);
         }
 
         private static IDictionary<string, string> ConvertMetadata(MetadataCollection collection)
@@ -389,6 +407,21 @@ namespace Raven.Server.Documents.PeriodicBackup.Aws
                 case HttpStatusCode.Forbidden:
                     await AssertBucketPermissionsAsync();
                     break;
+            }
+        }
+
+        private class CustomS3Config : AmazonS3Config
+        {
+            private readonly string _customUrl;
+
+            public CustomS3Config(string customUrl)
+            {
+                _customUrl = customUrl;
+            }
+
+            public override string DetermineServiceURL()
+            {
+                return _customUrl;
             }
         }
     }

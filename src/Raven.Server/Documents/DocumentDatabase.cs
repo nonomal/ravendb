@@ -450,48 +450,51 @@ namespace Raven.Server.Documents
 
                 _hasClusterTransaction.Reset();
 
-                using (ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext context))
-                using (context.OpenReadTransaction())
+                try
                 {
-                    try
+                    using (ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext context))
+                    using (context.OpenReadTransaction())
                     {
-                        var batch = new List<ClusterTransactionCommand.SingleClusterDatabaseCommand>(
-                            ClusterTransactionCommand.ReadCommandsBatch(context, Name, fromCount: _nextClusterCommand, take: 256));
-
-                        if (batch.Count == 0)
-                        {
-                            continue;
-                        }
-
-                        var mergedCommands = new BatchHandler.ClusterTransactionMergedCommand(this, batch);
-                        try
-                        {
-                            //If we get a database shutdown while we process a cluster tx command this
-                            //will cause us to stop running and disposing the context while its memory is still been used by the merger execution
-                            await TxMerger.Enqueue(mergedCommands);
-                        }
-                        catch (Exception e)
-                        {
-                            if (_logger.IsInfoEnabled)
-                            {
-                                _logger.Info($"Failed to execute cluster transaction batch (count: {batch.Count}), will retry them one-by-one.", e);
-                            }
-                            await ExecuteClusterTransactionOneByOne(batch);
-                            continue;
-                        }
-                        foreach (var command in batch)
-                        {
-                            OnClusterTransactionCompletion(command, mergedCommands);
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        if (_logger.IsInfoEnabled)
-                        {
-                            _logger.Info($"Can't perform cluster transaction on database '{Name}'.", e);
-                        }
+                        await ExecuteClusterTransaction(context);
                     }
                 }
+                catch (Exception e)
+                {
+                    if (_logger.IsInfoEnabled)
+                    {
+                        _logger.Info($"Can't perform cluster transaction on database '{Name}'.", e);
+                    }
+                }
+            }
+        }
+
+        public async Task ExecuteClusterTransaction(TransactionOperationContext context)
+        {
+            var batch = new List<ClusterTransactionCommand.SingleClusterDatabaseCommand>(
+                ClusterTransactionCommand.ReadCommandsBatch(context, Name, fromCount: _nextClusterCommand, take: 256));
+
+            if (batch.Count == 0)
+                return;
+
+            var mergedCommands = new BatchHandler.ClusterTransactionMergedCommand(this, batch);
+            try
+            {
+                //If we get a database shutdown while we process a cluster tx command this
+                //will cause us to stop running and disposing the context while its memory is still been used by the merger execution
+                await TxMerger.Enqueue(mergedCommands);
+            }
+            catch (Exception e)
+            {
+                if (_logger.IsInfoEnabled)
+                {
+                    _logger.Info($"Failed to execute cluster transaction batch (count: {batch.Count}), will retry them one-by-one.", e);
+                }
+                await ExecuteClusterTransactionOneByOne(batch);
+                return;
+            }
+            foreach (var command in batch)
+            {
+                OnClusterTransactionCompletion(command, mergedCommands);
             }
         }
 
@@ -657,7 +660,7 @@ namespace Raven.Server.Documents
 
                 ForTestingPurposes?.DisposeLog?.Invoke(Name, $"Drained all requests. Took: {sp.Elapsed}");
             }
-            
+
             var exceptionAggregator = new ExceptionAggregator(_logger, $"Could not dispose {nameof(DocumentDatabase)} {Name}");
 
             ForTestingPurposes?.DisposeLog?.Invoke(Name, "Acquiring cluster lock");
@@ -1047,7 +1050,7 @@ namespace Raven.Server.Documents
                     case StorageEnvironmentWithType.StorageEnvironmentType.Index:
                         yield return new FullBackup.StorageEnvironmentInformation
                         {
-                            Name = IndexDefinitionBase.GetIndexNameSafeForFileSystem(storageEnvironmentWithType.Name),
+                            Name = IndexDefinitionBaseServerSide.GetIndexNameSafeForFileSystem(storageEnvironmentWithType.Name),
                             Folder = Constants.Documents.PeriodicBackup.Folders.Indexes,
                             Env = storageEnvironmentWithType.Environment
                         };
@@ -1326,7 +1329,7 @@ namespace Raven.Server.Documents
                                     _logger.Operations(msg);
 
 #if !RELEASE
-                                    Console.WriteLine(msg);   
+                                    Console.WriteLine(msg);
 #endif
                                 }
                             }
@@ -1767,7 +1770,9 @@ namespace Raven.Server.Documents
             internal Action ActionToCallDuringDocumentDatabaseInternalDispose;
 
             internal Action CollectionRunnerBeforeOpenReadTransaction;
-            
+
+            internal Action CompactionAfterDatabaseUnload;
+
             internal bool SkipDrainAllRequests = false;
 
             internal Action<string, string> DisposeLog;
@@ -1779,6 +1784,22 @@ namespace Raven.Server.Documents
                 ActionToCallDuringDocumentDatabaseInternalDispose = action;
 
                 return new DisposableAction(() => ActionToCallDuringDocumentDatabaseInternalDispose = null);
+            }
+
+            internal Action Subscription_ActionToCallDuringWaitForChangedDocuments;
+            internal Action<long> Subscription_ActionToCallAfterRegisterSubscriptionConnection;
+
+            internal IDisposable CallDuringWaitForChangedDocuments(Action action)
+            {
+                Subscription_ActionToCallDuringWaitForChangedDocuments = action;
+
+                return new DisposableAction(() => Subscription_ActionToCallDuringWaitForChangedDocuments = null);
+            }
+            internal IDisposable CallAfterRegisterSubscriptionConnection(Action<long> action)
+            {
+                Subscription_ActionToCallAfterRegisterSubscriptionConnection = action;
+
+                return new DisposableAction(() => Subscription_ActionToCallAfterRegisterSubscriptionConnection = null);
             }
         }
     }

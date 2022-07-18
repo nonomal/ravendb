@@ -34,6 +34,8 @@ namespace Raven.Client.Documents.Linq
 
         private readonly DocumentConventions _conventions;
 
+        internal const string CounterMethodName = "counter";
+
         public LinqPathProvider(DocumentConventions conventions)
         {
             _conventions = conventions;
@@ -42,7 +44,7 @@ namespace Raven.Client.Documents.Linq
         /// <summary>
         /// Get the path from the expression, including considering dictionary calls
         /// </summary>
-        public Result GetPath(Expression expression)
+        public Result GetPath(Expression expression, bool isFilterActive = false)
         {
             expression = SimplifyExpression(expression);
 
@@ -58,6 +60,15 @@ namespace Raven.Client.Documents.Linq
                         throw new ArgumentException("Not supported computation: " + callExpression +
                                             ". You cannot use computation in RavenDB queries (only simple member expressions are allowed).");
 
+                    if (isFilterActive)
+                    {
+                        return new Result
+                        {
+                            MemberType = callExpression.Method.ReturnType,
+                            IsNestedPath = false,
+                            Path = "Count"
+                        };
+                    }
                     var target = GetPath(callExpression.Arguments[0]);
                     return new Result
                     {
@@ -69,10 +80,19 @@ namespace Raven.Client.Documents.Linq
 
                 if (callExpression.Method.Name == "get_Item")
                 {
-                    var parent = GetPath(callExpression.Object);
-
                     var itemKey = GetValueFromExpression(callExpression.Arguments[0], callExpression.Method.GetParameters()[0].ParameterType).ToString();
 
+                    if (callExpression.Object?.NodeType == ExpressionType.Parameter)
+                    {
+                        return new Result
+                        {
+                            MemberType = callExpression.Method.ReturnType,
+                            IsNestedPath = false,
+                            Path = itemKey
+                        };
+                    }
+
+                    var parent = GetPath(callExpression.Object);
                     return new Result
                     {
                         MemberType = callExpression.Method.ReturnType,
@@ -106,6 +126,17 @@ namespace Raven.Client.Documents.Linq
                 if (IsCounterCall(callExpression))
                 {
                     return CreateCounterResult(callExpression);
+                }
+
+                if (IsMetadataCall(callExpression))
+                {
+                    return new Result
+                    {
+                        MemberType = callExpression.Method.ReturnType,
+                        IsNestedPath = false,
+                        Path = "getMetadata",
+                        Args = new[] { callExpression.Arguments[0].ToString() }
+                    };
                 }
 
                 throw new NotSupportedException(
@@ -196,7 +227,7 @@ namespace Raven.Client.Documents.Linq
             {
                 MemberType = typeof(long?),
                 IsNestedPath = false,
-                Path = "counter",
+                Path = CounterMethodName,
                 Args = args
             };
         }
@@ -524,8 +555,8 @@ namespace Raven.Client.Documents.Linq
 
         public static bool IsCounterCall(MethodCallExpression mce)
         {
-            return mce.Method.DeclaringType == typeof(RavenQuery) && mce.Method.Name == "Counter"
-                   || mce.Object?.Type == typeof(ISessionDocumentCounters) && mce.Method.Name == "Get";
+            return mce.Method.DeclaringType == typeof(RavenQuery) && mce.Method.Name == nameof(RavenQuery.Counter)
+                   || mce.Object?.Type == typeof(ISessionDocumentCounters) && mce.Method.Name == nameof(ISessionDocumentCounters.Get);
         }
 
         public static bool IsCompareExchangeCall(MethodCallExpression mce)
@@ -572,5 +603,10 @@ namespace Raven.Client.Documents.Linq
                                                 $"Time Series query expressions must return type '{nameof(TimeSeriesRawResult)}' or '{nameof(TimeSeriesAggregationResult)}'. " +
                                                 "Did you forget to call 'ToList'?");
         }
+        public static bool IsMetadataCall(MethodCallExpression mce)
+        {
+            return mce.Method.DeclaringType == typeof(RavenQuery) && mce.Method.Name == nameof(RavenQuery.Metadata);
+        }
+
     }
 }

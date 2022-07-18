@@ -1,13 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
-using Raven.Client.Documents;
 using Raven.Client.Documents.Operations.ConnectionStrings;
 using Raven.Client.Documents.Operations.ETL;
 using Raven.Client.Documents.Operations.ETL.ElasticSearch;
@@ -27,35 +25,17 @@ namespace SlowTests.Server.Documents.ETL.ElasticSearch
 {
     public class ElasticSearchEtlTests : ElasticSearchEtlTestBase
     {
-        
+
         public ElasticSearchEtlTests(ITestOutputHelper output) : base(output)
         {
         }
-        
-        private const string OrderIndexName = "orders";
-        private const string OrderLinesIndexName = "orderlines";
-        
-        protected const string defaultScript = @"
-var orderData = {
-    Id: id(this),
-    OrderLinesCount: this.OrderLines.length,
-    TotalCost: 0
-};
 
-for (var i = 0; i < this.OrderLines.length; i++) {
-    var line = this.OrderLines[i];
-    var cost = (line.Quantity * line.PricePerUnit) *  ( 1 - line.Discount);
-    orderData.TotalCost += line.Cost * line.Quantity;
-    loadToOrderLines({
-        OrderId: id(this),
-        Qty: line.Quantity,
-        Product: line.Product,
-        Cost: line.Cost
-    });
-}
+        protected string UsersIndexName => $"Users{IndexSuffix}".ToLower();
 
-loadToOrders(orderData);
-";
+        protected List<ElasticSearchIndex> UsersIndex => new()
+        {
+            new ElasticSearchIndex {IndexName = UsersIndexName, DocumentIdProperty = "UserId"}
+        };
 
         [RequiresElasticSearchFact]
         public void SimpleScript()
@@ -63,7 +43,7 @@ loadToOrders(orderData);
             using (var store = GetDocumentStore())
             using (GetElasticClient(out var client))
             {
-                SetupElasticEtl(store, defaultScript, new List<string>() {OrderIndexName, OrderLinesIndexName});
+                var config = SetupElasticEtl(store, DefaultScript, DefaultIndexes, DefaultCollections);
                 var etlDone = WaitForEtl(store, (n, statistics) => statistics.LoadSuccesses != 0);
 
                 using (var session = store.OpenSession())
@@ -77,13 +57,14 @@ loadToOrders(orderData);
                     });
                     session.SaveChanges();
                 }
-                
-                etlDone.Wait(TimeSpan.FromMinutes(1));
 
-                EnsureNonStaleElasticResults(client);
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                var ordersCount = client.Count<object>(c => c.Index(OrderIndexName));
+                var ordersCount = client.Count<object>(c => c.Index(OrdersIndexName));
                 var orderLinesCount = client.Count<object>(c => c.Index(OrderLinesIndexName));
+
+                Assert.True(ordersCount.IsValid);
+                Assert.True(orderLinesCount.IsValid);
 
                 Assert.Equal(1, ordersCount.Count);
                 Assert.Equal(2, orderLinesCount.Count);
@@ -96,13 +77,14 @@ loadToOrders(orderData);
 
                     session.SaveChanges();
                 }
-                
-                etlDone.Wait(TimeSpan.FromMinutes(1));
 
-                EnsureNonStaleElasticResults(client);
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                var ordersCountAfterDelete = client.Count<object>(c => c.Index(OrderIndexName));
+                var ordersCountAfterDelete = client.Count<object>(c => c.Index(OrdersIndexName));
                 var orderLinesCountAfterDelete = client.Count<object>(c => c.Index(OrderLinesIndexName));
+
+                Assert.True(ordersCount.IsValid);
+                Assert.True(orderLinesCount.IsValid);
 
                 Assert.Equal(0, ordersCountAfterDelete.Count);
                 Assert.Equal(0, orderLinesCountAfterDelete.Count);
@@ -118,7 +100,7 @@ loadToOrders(orderData);
                 var numberOfOrders = 100;
                 var numberOfLinesPerOrder = 5;
 
-                SetupElasticEtl(store, defaultScript, new List<string>() { OrderIndexName, OrderLinesIndexName });
+                var config = SetupElasticEtl(store, DefaultScript, DefaultIndexes, DefaultCollections);
                 var etlDone = WaitForEtl(store, (n, statistics) => statistics.LastProcessedEtag >= numberOfOrders);
 
                 for (int i = 0; i < numberOfOrders; i++)
@@ -132,7 +114,7 @@ loadToOrders(orderData);
 
                         for (int j = 0; j < numberOfLinesPerOrder; j++)
                         {
-                            order.OrderLines.Add(new OrderLine { Cost = j + 1, Product = "foos/" + j, Quantity = (i * j) % 10});
+                            order.OrderLines.Add(new OrderLine { Cost = j + 1, Product = "foos/" + j, Quantity = (i * j) % 10 });
                         }
 
                         session.Store(order, "orders/" + i);
@@ -141,13 +123,11 @@ loadToOrders(orderData);
                     }
                 }
 
-                etlDone.Wait(TimeSpan.FromMinutes(1));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
-
-                var ordersCount = client.Count<object>(c => c.Index(OrderIndexName));
+                var ordersCount = client.Count<object>(c => c.Index(OrdersIndexName));
                 var orderLinesCount = client.Count<object>(c => c.Index(OrderLinesIndexName));
-
+                
                 Assert.Equal(numberOfOrders, ordersCount.Count);
                 Assert.Equal(numberOfOrders * numberOfLinesPerOrder, orderLinesCount.Count);
 
@@ -163,45 +143,39 @@ loadToOrders(orderData);
                     }
                 }
 
-                etlDone.Wait(TimeSpan.FromMinutes(1));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
-
-                Thread.Sleep(3000);
-                var ordersCountAfterDelete = client.Count<object>(c => c.Index(OrderIndexName));
+                var ordersCountAfterDelete = client.Count<object>(c => c.Index(OrdersIndexName));
                 var orderLinesCountAfterDelete = client.Count<object>(c => c.Index(OrderLinesIndexName));
 
                 Assert.Equal(0, ordersCountAfterDelete.Count);
                 Assert.Equal(0, orderLinesCountAfterDelete.Count);
             }
         }
+
         [Fact]
-        public void Simple_script_error_expected()
+        public async Task Simple_script_error_expected()
         {
             using (var store = GetDocumentStore())
             {
-                AddEtl(store,
-                    new ElasticSearchEtlConfiguration()
+                var config = new ElasticSearchEtlConfiguration
+                {
+                    ConnectionStringName = "test",
+                    Name = "myFirstEtl",
+                    ElasticIndexes = DefaultIndexes,
+                    Transforms =
                     {
-                        ConnectionStringName = "test",
-                        Name = "myFirstEtl",
-                        ElasticIndexes =
+                        new Transformation
                         {
-                            new ElasticSearchIndex {IndexName = OrderIndexName, IndexIdProperty = "Id"},
-                            new ElasticSearchIndex {IndexName = OrderLinesIndexName, IndexIdProperty = "OrderId"},
-                        },
-                        Transforms =
-                        {
-                            new Transformation()
-                            {
-                                Collections = {OrderIndexName, OrderLinesIndexName},
-                                Script = defaultScript,
-                                Name = "a"
-                            }
-                        },
-                    }, new ElasticSearchConnectionString {Name = "test", Nodes = new[] {"http://localhost:9300"}}); //wrong elastic search url
-                
-                var etlDone = WaitForEtl(store, (n, statistics) => statistics.LoadSuccesses != 0);
+                            Collections = DefaultCollections.ToList(),
+                            Script = DefaultScript,
+                            Name = "a"
+                        }
+                    },
+                };
+
+                AddEtl(store, config, new ElasticSearchConnectionString { Name = "test", Nodes = new[] { "http://localhost:1234" } }); //wrong elastic search url
+
 
                 using (var session = store.OpenSession())
                 {
@@ -215,11 +189,14 @@ loadToOrders(orderData);
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromSeconds(5));
+                var alert = await AssertWaitForNotNullAsync(() =>
+                {
+                    TryGetLoadError(store.Database, config, out var error);
+
+                    return Task.FromResult(error);
+                }, timeout: (int)TimeSpan.FromMinutes(1).TotalMilliseconds);
                 
-                var key = "AlertRaised/Etl_LoadError/ElasticSearch ETL/myFirstEtl/a";
-                var alert = GetDatabase(store.Database).Result.NotificationCenter.GetStoredMessage(key);
-                Assert.Equal("Loading transformed data to the destination has failed (last 500 errors are shown)", alert);
+                Assert.StartsWith("Raven.Server.Exceptions.ETL.ElasticSearch.ElasticSearchLoadException", alert.Error);
             }
         }
 
@@ -243,27 +220,28 @@ loadToOrders(orderData);
 
                 var etlDone = WaitForEtl(store, (n, statistics) => statistics.LoadSuccesses != 0);
 
-                SetupElasticEtl(store, defaultScript, new List<string>() {OrderIndexName, OrderLinesIndexName});
+                var config = SetupElasticEtl(store, DefaultScript, DefaultIndexes, DefaultCollections);
 
-                etlDone.Wait(TimeSpan.FromMinutes(1));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
+                client.Indices.Refresh(OrdersIndexName);
+                client.Indices.Refresh(OrderLinesIndexName);
 
                 var orderResponse = client.Search<object>(d => d
-                    .Index(OrderIndexName)
+                    .Index(OrdersIndexName)
                     .Query(q => q
-                        .Match(p => p
+                        .Term(p => p
                             .Field("Id")
-                            .Query("orders/1-a"))
+                            .Value("orders/1-a"))
                     )
                 );
 
                 var orderLineResponse = client.Search<object>(d => d
                     .Index(OrderLinesIndexName)
                     .Query(q => q
-                        .Match(p => p
+                        .Term(p => p
                             .Field("OrderId")
-                            .Query("orders/1-a"))
+                            .Value("orders/1-a"))
                     )
                 );
 
@@ -286,13 +264,15 @@ loadToOrders(orderData);
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromMinutes(1));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
+                client.Indices.Refresh(OrdersIndexName);
+                client.Indices.Refresh(OrderLinesIndexName);
 
-                var ordersCountAfterDelete = client.Count<object>(c => c.Index(OrderIndexName));
+
+                var ordersCountAfterDelete = client.Count<object>(c => c.Index(OrdersIndexName));
                 var orderLinesCountAfterDelete = client.Count<object>(c => c.Index(OrderLinesIndexName));
-                
+
                 Assert.Equal(0, ordersCountAfterDelete.Count);
                 Assert.Equal(0, orderLinesCountAfterDelete.Count);
             }
@@ -304,7 +284,7 @@ loadToOrders(orderData);
             using (var store = GetDocumentStore())
             using (GetElasticClient(out var client))
             {
-                SetupElasticEtl(store, defaultScript, new List<string>() {OrderIndexName, OrderLinesIndexName});
+                var config = SetupElasticEtl(store, DefaultScript, DefaultIndexes, DefaultCollections);
                 var etlDone = WaitForEtl(store, (n, statistics) => statistics.LoadSuccesses != 0);
 
                 using (var session = store.OpenSession())
@@ -319,11 +299,12 @@ loadToOrders(orderData);
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromSeconds(30));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
+                client.Indices.Refresh(OrdersIndexName);
+                client.Indices.Refresh(OrderLinesIndexName);
 
-                var ordersCount = client.Count<object>(c => c.Index(OrderIndexName));
+                var ordersCount = client.Count<object>(c => c.Index(OrdersIndexName));
                 var orderLinesCount = client.Count<object>(c => c.Index(OrderLinesIndexName));
 
                 Assert.Equal(1, ordersCount.Count);
@@ -338,11 +319,12 @@ loadToOrders(orderData);
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromSeconds(90));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
+                client.Indices.Refresh(OrdersIndexName);
+                client.Indices.Refresh(OrderLinesIndexName);
 
-                var ordersCountAfterDelete = client.Count<object>(c => c.Index(OrderIndexName));
+                var ordersCountAfterDelete = client.Count<object>(c => c.Index(OrdersIndexName));
                 var orderLinesCountAfterDelete = client.Count<object>(c => c.Index(OrderLinesIndexName));
 
                 Assert.Equal(1, ordersCountAfterDelete.Count);
@@ -368,19 +350,19 @@ loadToOrders(orderData);
                     session.SaveChanges();
                 }
 
-                SetupElasticEtl(store, defaultScript, new List<string>() {OrderIndexName, OrderLinesIndexName});
+                var config = SetupElasticEtl(store, DefaultScript, DefaultIndexes, DefaultCollections);
                 var etlDone = WaitForEtl(store, (n, statistics) => statistics.LoadSuccesses != 0);
 
-                etlDone.Wait(TimeSpan.FromMinutes(1));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
+                client.Indices.Refresh(OrdersIndexName);
 
                 var orderResponse = client.Search<object>(d => d
-                    .Index(OrderIndexName)
+                    .Index(OrdersIndexName)
                     .Query(q => q
-                        .Match(p => p
+                        .Term(p => p
                             .Field("Id")
-                            .Query("orders/1-a"))
+                            .Value("orders/1-a"))
                     )
                 );
 
@@ -409,16 +391,16 @@ loadToOrders(orderData);
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromMinutes(2));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(2), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
+                client.Indices.Refresh(OrdersIndexName);
 
                 var orderResponse1 = client.Search<object>(d => d
-                    .Index(OrderIndexName)
+                    .Index(OrdersIndexName)
                     .Query(q => q
-                        .Match(p => p
+                        .Term(p => p
                             .Field("Id")
-                            .Query("orders/1-a"))
+                            .Value("orders/1-a"))
                     )
                 );
 
@@ -439,28 +421,28 @@ loadToOrders(orderData);
             using (var store = GetDocumentStore())
             using (GetElasticClient(out var client))
             {
-                SetupElasticEtl(store, @"var userData = { UserId: id(this), Name: this.Name }; loadToUsers(userData)", new[] {"Users", "People"});
+                var config = SetupElasticEtl(store, @"var userData = { UserId: id(this), Name: this.Name }; loadToUsers" + IndexSuffix + @"(userData)", UsersIndex, new[] { "Users", "People" });
                 var etlDone = WaitForEtl(store, (n, statistics) => statistics.LoadSuccesses != 0);
 
                 using (var session = store.OpenSession())
                 {
-                    session.Store(new User {Name = "Joe Doe"}, "users/1");
+                    session.Store(new User { Name = "Joe Doe" }, "users/1");
 
-                    session.Store(new Person {Name = "James Smith"}, "people/1");
+                    session.Store(new Person { Name = "James Smith" }, "people/1");
 
                     session.SaveChanges();
                 }
-                
-                etlDone.Wait(TimeSpan.FromSeconds(20));
 
-                EnsureNonStaleElasticResults(client);
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
+
+                client.Indices.Refresh(UsersIndexName);
 
                 var userResponse1 = client.Search<object>(d => d
-                    .Index("users")
+                    .Index(UsersIndexName)
                     .Query(q => q
-                        .MatchPhrase(p => p
+                        .Term(p => p
                             .Field("UserId")
-                            .Query("users/1"))
+                            .Value("users/1"))
                     )
                 );
 
@@ -469,12 +451,14 @@ loadToOrders(orderData);
                 Assert.NotNull(userObject1);
                 Assert.Equal("Joe Doe", userObject1["Name"]);
 
+                client.Indices.Refresh(UsersIndexName);
+
                 var userResponse2 = client.Search<object>(d => d
-                    .Index("users")
+                    .Index(UsersIndexName)
                     .Query(q => q
-                        .MatchPhrase(p => p
+                        .Term(p => p
                             .Field("UserId")
-                            .Query("people/1"))
+                            .Value("people/1"))
                     )
                 );
 
@@ -489,23 +473,23 @@ loadToOrders(orderData);
 
                 using (var session = store.OpenSession())
                 {
-                    session.Store(new User {Name = "Doe Joe"}, "users/1");
+                    session.Store(new User { Name = "Doe Joe" }, "users/1");
 
-                    session.Store(new Person {Name = "Smith James"}, "people/1");
+                    session.Store(new Person { Name = "Smith James" }, "people/1");
 
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromSeconds(20));
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), store.Database, config);
 
-                EnsureNonStaleElasticResults(client);
+                client.Indices.Refresh(UsersIndexName);
 
                 var userResponse3 = client.Search<object>(d => d
-                    .Index("users")
+                    .Index(UsersIndexName)
                     .Query(q => q
-                        .MatchPhrase(p => p
+                        .Term(p => p
                             .Field("UserId")
-                            .Query("users/1"))
+                            .Value("users/1"))
                     )
                 );
 
@@ -514,12 +498,14 @@ loadToOrders(orderData);
                 Assert.NotNull(userObject3);
                 Assert.Equal("Doe Joe", userObject3["Name"]);
 
+                client.Indices.Refresh(UsersIndexName);
+
                 var userResponse4 = client.Search<object>(d => d
-                    .Index("users")
+                    .Index(UsersIndexName)
                     .Query(q => q
-                        .MatchPhrase(p => p
+                        .Term(p => p
                             .Field("UserId")
-                            .Query("people/1"))
+                            .Value("people/1"))
                     )
                 );
 
@@ -539,26 +525,26 @@ loadToOrders(orderData);
             {
                 var etlDone = WaitForEtl(src, (n, statistics) => statistics.LoadSuccesses != 0);
 
-                SetupElasticEtl(src, @"var userData = { UserId: id(this), FirstName: this.Name, LastName: this.LastName }; loadToUsers(userData)", new List<string>(),
+                var config = SetupElasticEtl(src, @"var userData = { UserId: id(this), FirstName: this.Name, LastName: this.LastName }; loadTo" + UsersIndexName + @"(userData)",
+                    UsersIndex,
+                    new List<string>(),
                     applyToAllDocuments: true);
 
                 using (var session = src.OpenSession())
                 {
-                    session.Store(new User {Name = "James", LastName = "Smith"}, "users/1");
+                    session.Store(new User { Name = "James", LastName = "Smith" }, "users/1");
 
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromSeconds(30));
-                
-                EnsureNonStaleElasticResults(client);
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), src.Database, config);
 
                 var userResponse = client.Search<object>(d => d
-                    .Index("users")
+                    .Index(UsersIndexName)
                     .Query(q => q
-                        .Match(p => p
+                        .Term(p => p
                             .Field("UserId")
-                            .Query("users/1"))
+                            .Value("users/1"))
                     )
                 );
 
@@ -574,27 +560,26 @@ loadToOrders(orderData);
             {
                 var etlDone = WaitForEtl(src, (n, statistics) => statistics.LoadSuccesses != 0);
 
-                SetupElasticEtl(src,
-                    @"var userData = { UserId: id(this), FirstName: this.Name, LastName: this.LastName }; if (this.Name == 'Joe Doe') loadToUsers(userData)",
-                    new List<string>() {"Users"});
+                var config = SetupElasticEtl(src,
+                    @"var userData = { UserId: id(this), FirstName: this.Name, LastName: this.LastName }; if (this.Name == 'Joe Doe') loadToUsers" + IndexSuffix + @"(userData)",
+                    UsersIndex,
+                    new List<string> { "Users" });
 
                 using (var session = src.OpenSession())
                 {
-                    session.Store(new User {Name = "Joe Doe"}, "users/1");
+                    session.Store(new User { Name = "Joe Doe" }, "users/1");
 
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromMinutes(1));
-
-                EnsureNonStaleElasticResults(client);
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), src.Database, config);
 
                 var userResponse = client.Search<object>(d => d
-                    .Index("users")
+                    .Index(UsersIndexName)
                     .Query(q => q
-                        .Match(p => p
+                        .Term(p => p
                             .Field("UserId")
-                            .Query("users/1"))
+                            .Value("users/1"))
                     )
                 );
 
@@ -609,16 +594,14 @@ loadToOrders(orderData);
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromMinutes(1));
-
-                EnsureNonStaleElasticResults(client);
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), src.Database, config);
 
                 userResponse = client.Search<object>(d => d
                     .Index("users")
                     .Query(q => q
-                        .Match(p => p
+                        .Term(p => p
                             .Field("UserId")
-                            .Query("users/1"))
+                            .Value("users/1"))
                     )
                 );
 
@@ -649,10 +632,10 @@ loadToOrders(orderData);
                 {
                     Name = "test",
                     ConnectionStringName = "test",
-                    Transforms = {new Transformation {Name = "test", Collections = {"Orders"}, Script = @"this.TotalCost = 10;"}}
+                    Transforms = { new Transformation { Name = "test", Collections = { "Orders" }, Script = @"this.TotalCost = 10;" } }
                 };
 
-                config.Initialize(new ElasticSearchConnectionString() {Name = "Foo", Nodes = new[] {"http://localhost:9200"}});
+                config.Initialize(new ElasticSearchConnectionString { Name = "Foo", Nodes = new[] { "http://localhost:9200" } });
 
                 List<string> errors;
                 config.Validate(out errors);
@@ -666,9 +649,9 @@ loadToOrders(orderData);
         [RequiresElasticSearchFact]
         public void Etl_from_encrypted_to_non_encrypted_db_will_work()
         {
-            var certificates = SetupServerAuthentication();
+            var certificates = Certificates.SetupServerAuthentication();
             var dbName = GetDatabaseName();
-            var adminCert = RegisterClientCertificate(certificates, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+            var adminCert = Certificates.RegisterClientCertificate(certificates, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
 
             var buffer = new byte[32];
             using (var rand = RandomNumberGenerator.Create())
@@ -695,25 +678,28 @@ loadToOrders(orderData);
 
             using (var src = GetDocumentStore(new Options
             {
-                AdminCertificate = adminCert, ClientCertificate = adminCert, ModifyDatabaseRecord = record => record.Encrypted = true, ModifyDatabaseName = s => dbName,
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+                ModifyDatabaseRecord = record => record.Encrypted = true,
+                ModifyDatabaseName = s => dbName,
             }))
             using (GetElasticClient(out var client))
             {
-                AddEtl(src,
-                    new ElasticSearchEtlConfiguration()
+                var config = new ElasticSearchEtlConfiguration
+                {
+                    ConnectionStringName = "test",
+                    Name = "myFirstEtl",
+                    ElasticIndexes = UsersIndex,
+                    Transforms =
                     {
-                        ConnectionStringName = "test",
-                        Name = "myFirstEtl",
-                        ElasticIndexes = {new ElasticSearchIndex {IndexName = "Users", IndexIdProperty = "UserId"},},
-                        Transforms =
+                        new Transformation
                         {
-                            new Transformation()
-                            {
-                                Collections = {"Users"}, Script = @"var userData = { UserId: id(this), Name: this.Name }; loadToUsers(userData)", Name = "a"
-                            }
-                        },
-                        AllowEtlOnNonEncryptedChannel = true
-                    }, new ElasticSearchConnectionString {Name = "test", Nodes = new[] {"http://localhost:9200"}});
+                            Collections = {"Users"}, Script = @"var userData = { UserId: id(this), Name: this.Name }; loadTo" + UsersIndexName + @"(userData)", Name = "a"
+                        }
+                    },
+                    AllowEtlOnNonEncryptedChannel = true
+                };
+                AddEtl(src, config, new ElasticSearchConnectionString { Name = "test", Nodes = ElasticSearchTestNodes.Instance.VerifiedNodes.Value });
 
                 var db = GetDatabase(src.Database).Result;
 
@@ -723,21 +709,19 @@ loadToOrders(orderData);
 
                 using (var session = src.OpenSession())
                 {
-                    session.Store(new User() {Name = "Joe Doe"});
+                    session.Store(new User { Name = "Joe Doe" });
 
                     session.SaveChanges();
                 }
 
-                etlDone.Wait(TimeSpan.FromMinutes(1));
-
-                EnsureNonStaleElasticResults(client);
+                AssertEtlDone(etlDone, TimeSpan.FromMinutes(1), src.Database, config);
 
                 var userResponse1 = client.Search<object>(d => d
-                    .Index("users")
+                    .Index(UsersIndexName)
                     .Query(q => q
-                        .MatchPhrase(p => p
+                        .Term(p => p
                             .Field("UserId")
-                            .Query("users/1-a"))
+                            .Value("users/1-a"))
                     )
                 );
 
@@ -753,10 +737,10 @@ loadToOrders(orderData);
         {
             var c = new ElasticSearchEtlConfiguration();
 
-            c.Connection = new ElasticSearchConnectionString()
+            c.Connection = new ElasticSearchConnectionString
             {
                 Name = "Test",
-                Nodes = new[] {"https://localhost:9200"}
+                Nodes = new[] { "https://localhost:9200" }
             };
 
             Assert.True(c.UsingEncryptedCommunicationChannel());
@@ -779,9 +763,10 @@ loadToOrders(orderData);
                     await session.SaveChangesAsync();
                 }
 
-                var result1 = store.Maintenance.Send(new PutConnectionStringOperation<ElasticSearchConnectionString>(new ElasticSearchConnectionString()
+                var result1 = store.Maintenance.Send(new PutConnectionStringOperation<ElasticSearchConnectionString>(new ElasticSearchConnectionString
                 {
-                    Name = "simulate", Nodes = new[] {"http://localhost:9200"}
+                    Name = "simulate",
+                    Nodes = new[] { "http://localhost:9200" }
                 }));
                 Assert.NotNull(result1.RaftCommandIndex);
 
@@ -789,50 +774,77 @@ loadToOrders(orderData);
 
                 using (database.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext context))
                 {
-                    var result = (ElasticSearchEtlTestScriptResult)ElasticSearchEtl.TestScript(
+                    using (ElasticSearchEtl.TestScript(
                         new TestElasticSearchEtlScript
                         {
                             DocumentId = "orders/1-A",
-                            Configuration = new ElasticSearchEtlConfiguration()
+                            Configuration = new ElasticSearchEtlConfiguration
                             {
                                 Name = "simulate",
                                 ConnectionStringName = "simulate",
                                 ElasticIndexes =
                                 {
-                                    new ElasticSearchIndex {IndexName = "Orders", IndexIdProperty = "Id"},
-                                    new ElasticSearchIndex {IndexName = "OrderLines", IndexIdProperty = "OrderId"},
-                                    new ElasticSearchIndex {IndexName = "NotUsedInScript", IndexIdProperty = "OrderId"},
+                                    new ElasticSearchIndex { IndexName = "Orders", DocumentIdProperty = "Id" },
+                                    new ElasticSearchIndex { IndexName = "OrderLines", DocumentIdProperty = "OrderId" },
+                                    new ElasticSearchIndex { IndexName = "NotUsedInScript", DocumentIdProperty = "OrderId" },
                                 },
                                 Transforms =
                                 {
-                                    new Transformation() {Collections = {"Orders"}, Name = "OrdersAndLines", Script = defaultScript + "output('test output')"}
+                                    new Transformation
+                                    {
+                                        Collections = { "Orders" }, Name = "OrdersAndLines", Script = @"
+var orderData = {
+    Id: id(this),
+    OrderLinesCount: this.OrderLines.length,
+    TotalCost: 0
+};
+
+for (var i = 0; i < this.OrderLines.length; i++) {
+    var line = this.OrderLines[i];
+    var cost = (line.Quantity * line.PricePerUnit) *  ( 1 - line.Discount);
+    orderData.TotalCost += line.Cost * line.Quantity;
+    loadToOrderLines({
+        OrderId: id(this),
+        Qty: line.Quantity,
+        Product: line.Product,
+        Cost: line.Cost
+    });
+}
+
+loadToOrders(orderData);
+
+output('test output')"
+                                    }
                                 }
                             }
-                        }, database, database.ServerStore, context);
+                        }, database, database.ServerStore, context, out var testResult))
+                    {
+                        var result = (ElasticSearchEtlTestScriptResult)testResult;
 
-                    Assert.Equal(0, result.TransformationErrors.Count);
+                        Assert.Equal(0, result.TransformationErrors.Count);
 
-                    Assert.Equal(2, result.Summary.Count);
+                        Assert.Equal(2, result.Summary.Count);
 
-                    var orderLines = result.Summary.First(x => x.IndexName == "orderlines");
+                        var orderLines = result.Summary.First(x => x.IndexName == "orderlines");
 
-                    Assert.Equal(2, orderLines.Commands.Length); // delete and bulk
+                        Assert.Equal(2, orderLines.Commands.Length); // delete by query and bulk
 
-                    Assert.StartsWith("POST orderlines/_delete_by_query", orderLines.Commands[0]);
-                    Assert.StartsWith("POST orderlines/_bulk", orderLines.Commands[1]);
+                        Assert.StartsWith("POST orderlines/_delete_by_query?refresh=true", orderLines.Commands[0]);
+                        Assert.StartsWith("POST orderlines/_bulk?refresh=wait_for", orderLines.Commands[1]);
 
-                    var orders = result.Summary.First(x => x.IndexName == "orders");
+                        var orders = result.Summary.First(x => x.IndexName == "orders");
 
-                    Assert.Equal(2, orders.Commands.Length); // delete and bulk
+                        Assert.Equal(2, orders.Commands.Length); // refresh, delete by query and bulk
 
-                    Assert.StartsWith("POST orders/_delete_by_query", orders.Commands[0]);
-                    Assert.StartsWith("POST orders/_bulk", orders.Commands[1]);
+                        Assert.StartsWith("POST orders/_delete_by_query?refresh=true", orders.Commands[0]);
+                        Assert.StartsWith("POST orders/_bulk?refresh=wait_for", orders.Commands[1]);
 
-                    Assert.Equal("test output", result.DebugOutput[0]);
+                        Assert.Equal("test output", result.DebugOutput[0]);
+                    }
                 }
             }
         }
-        
+
         [Fact]
         public async Task CanTestDeletion()
         {
@@ -851,9 +863,10 @@ loadToOrders(orderData);
                     await session.SaveChangesAsync();
                 }
 
-                var result1 = store.Maintenance.Send(new PutConnectionStringOperation<ElasticSearchConnectionString>(new ElasticSearchConnectionString()
+                var result1 = store.Maintenance.Send(new PutConnectionStringOperation<ElasticSearchConnectionString>(new ElasticSearchConnectionString
                 {
-                    Name = "simulate", Nodes = new[] {"http://localhost:9200"}
+                    Name = "simulate",
+                    Nodes = new[] { "http://localhost:9200" }
                 }));
                 Assert.NotNull(result1.RaftCommandIndex);
 
@@ -861,41 +874,47 @@ loadToOrders(orderData);
 
                 using (database.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext context))
                 {
-                    var result = (ElasticSearchEtlTestScriptResult)ElasticSearchEtl.TestScript(
+                    using (ElasticSearchEtl.TestScript(
                         new TestElasticSearchEtlScript
                         {
                             DocumentId = "orders/1-A",
                             IsDelete = true,
-                            Configuration = new ElasticSearchEtlConfiguration()
+                            Configuration = new ElasticSearchEtlConfiguration
                             {
                                 Name = "simulate",
                                 ConnectionStringName = "simulate",
                                 ElasticIndexes =
                                 {
-                                    new ElasticSearchIndex {IndexName = "Orders", IndexIdProperty = "Id"},
-                                    new ElasticSearchIndex {IndexName = "OrderLines", IndexIdProperty = "OrderId"},
-                                    new ElasticSearchIndex {IndexName = "NotUsedInScript", IndexIdProperty = "OrderId"},
+                                    new ElasticSearchIndex { IndexName = OrdersIndexName, DocumentIdProperty = "Id" },
+                                    new ElasticSearchIndex { IndexName = OrderLinesIndexName, DocumentIdProperty = "OrderId" },
+                                    new ElasticSearchIndex { IndexName = "NotUsedInScript", DocumentIdProperty = "OrderId" },
                                 },
                                 Transforms =
                                 {
-                                    new Transformation() {Collections = {"Orders"}, Name = "OrdersAndLines", Script = defaultScript + "output('test output')"}
+                                    new Transformation
+                                    {
+                                        Collections = { "Orders" }, Name = "OrdersAndLines", Script = DefaultScript + "output('test output')"
+                                    }
                                 }
                             }
-                        }, database, database.ServerStore, context);
+                        }, database, database.ServerStore, context, out var testResult))
+                    {
+                        var result = (ElasticSearchEtlTestScriptResult)testResult;
 
-                    Assert.Equal(0, result.TransformationErrors.Count);
+                        Assert.Equal(0, result.TransformationErrors.Count);
 
-                    Assert.Equal(2, result.Summary.Count);
+                        Assert.Equal(2, result.Summary.Count);
 
-                    var orderLines = result.Summary.First(x => x.IndexName == "orderlines");
+                        var orderLines = result.Summary.First(x => x.IndexName == OrderLinesIndexName);
 
-                    Assert.Equal(1, orderLines.Commands.Length); // delete
+                        Assert.Equal(1, orderLines.Commands.Length); // delete
 
-                    var orders = result.Summary.First(x => x.IndexName == "orders");
+                        var orders = result.Summary.First(x => x.IndexName == OrdersIndexName);
 
-                    Assert.Equal(1, orders.Commands.Length); // delete
+                        Assert.Equal(1, orders.Commands.Length); // delete by query
+                    }
                 }
-                
+
                 using (var session = store.OpenAsyncSession())
                 {
                     Assert.NotNull(session.Query<Order>("orders/1-A"));
@@ -909,7 +928,7 @@ loadToOrders(orderData);
             using (var srcStore = GetDocumentStore())
             using (var dstStore = GetDocumentStore())
             {
-                SetupElasticEtl(srcStore, defaultScript, new List<string> { OrderIndexName, OrderLinesIndexName });
+                SetupElasticEtl(srcStore, DefaultScript, DefaultIndexes, DefaultCollections, nodes: new [] {"http://localhost:1234"});
 
                 var exportFile = GetTempFileName();
 
@@ -923,37 +942,6 @@ loadToOrders(orderData);
                 Assert.Equal(1, destinationRecord.ElasticSearchEtls.Count);
                 Assert.Equal(1, destinationRecord.ElasticSearchConnectionStrings.Count);
             }
-        }
-
-        protected void SetupElasticEtl(DocumentStore store, string script, IEnumerable<string> collections = null, bool applyToAllDocuments = false,
-            global::Raven.Client.Documents.Operations.ETL.ElasticSearch.Authentication authentication = null, [CallerMemberName] string caller = null)
-        {
-            var connectionStringName = $"{store.Database}@{store.Urls.First()} to ELASTIC";
-
-            AddEtl(store,
-                new ElasticSearchEtlConfiguration()
-                {
-                    Name = connectionStringName,
-                    ConnectionStringName = connectionStringName,
-                    ElasticIndexes =
-                    {
-                        new ElasticSearchIndex {IndexName = $"Orders", IndexIdProperty = "Id"},
-                        new ElasticSearchIndex {IndexName = $"OrderLines", IndexIdProperty = "OrderId"},
-                        new ElasticSearchIndex {IndexName = $"Users", IndexIdProperty = "UserId"},
-                    },
-                    Transforms =
-                    {
-                        new Transformation()
-                        {
-                            Name = $"ETL : {connectionStringName}",
-                            Collections = new List<string>(collections),
-                            Script = script,
-                            ApplyToAllDocuments = applyToAllDocuments
-                        }
-                    }
-                },
-                                
-                new ElasticSearchConnectionString {Name = connectionStringName, Nodes = ElasticSearchTestNodes.Instance.VerifiedNodes.Value, Authentication = authentication });
         }
 
         private class Order

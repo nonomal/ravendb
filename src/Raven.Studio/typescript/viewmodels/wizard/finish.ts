@@ -8,7 +8,7 @@ import app = require("durandal/app");
 import saveUnsecuredSetupCommand = require("commands/wizard/saveUnsecuredSetupCommand");
 import serverNotificationCenterClient = require("common/serverNotificationCenterClient");
 import continueClusterConfigurationCommand = require("commands/wizard/continueClusterConfigurationCommand");
-import letsEncryptInstructions = require("viewmodels/wizard/letsEncryptInstructions");
+import secureInstructions = require("viewmodels/wizard/secureInstructions");
 
 type messageItem = {
     message: string;
@@ -16,6 +16,8 @@ type messageItem = {
 }
 
 class finish extends setupStep {
+
+    view = require("views/wizard/finish.html");
 
     configurationTask: JQueryDeferred<void>;
     completedWithSuccess = ko.observable<boolean>();
@@ -216,10 +218,10 @@ class finish extends setupStep {
     restart() {
         const mode = this.model.mode();
         
-        if (mode === "LetsEncrypt") {
+        if (mode === "LetsEncrypt" || mode === "Secured") {
             // notify user that generated certificate needs to be installed
             // before redirecting to studio
-            app.showBootstrapDialog(new letsEncryptInstructions())
+            app.showBootstrapDialog(new secureInstructions())
                 .done((result) => {
                     if (result) {
                         this.spinners.restart(true);
@@ -235,7 +237,6 @@ class finish extends setupStep {
     private redirectToStudio() {
         window.location.href = this.model.getStudioUrl();
     }
-
 }
 
 export = finish;

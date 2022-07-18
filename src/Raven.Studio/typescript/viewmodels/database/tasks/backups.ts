@@ -17,6 +17,9 @@ import accessManager = require("common/shell/accessManager");
 import getManualBackupCommand = require("commands/database/tasks/getManualBackupCommand");
 
 class backups extends viewModelBase {
+
+    view = require("views/database/tasks/backups.html");
+    legendView = require("views/partial/databaseGroupLegend.html");
     
     private clusterManager = clusterTopologyManager.default;
     myNodeTag = ko.observable<string>();
@@ -61,11 +64,11 @@ class backups extends viewModelBase {
             .watchClusterTopologyChanges(() => this.refresh()));
         
         this.addNotification(this.changesContext.serverNotifications()
-            .watchDatabaseChange(this.activeDatabase().name, () => this.refresh()));
+            .watchDatabaseChange(this.activeDatabase()?.name, () => this.refresh()));
         
         this.addNotification(this.changesContext.serverNotifications().watchReconnect(() => this.refresh()));
         
-        this.updateUrl(appUrl.forBackups(this.activeDatabase()));
+        //this.updateUrl(appUrl.forBackups(this.activeDatabase()));
     }
 
     compositionComplete(): void {
@@ -93,6 +96,9 @@ class backups extends viewModelBase {
     }
     
     private refresh() {
+        if (!this.activeDatabase()) {
+            return;
+        }
         return $.when<any>(this.fetchDatabaseInfo(), this.fetchOngoingTasks(), this.fetchManualBackup());
     }
     

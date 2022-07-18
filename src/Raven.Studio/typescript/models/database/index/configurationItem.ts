@@ -10,6 +10,8 @@ class configurationItem {
         "Indexing.Analyzers.NGram.MaxGram",
         "Indexing.Analyzers.NGram.MinGram",
         "Indexing.Analyzers.Search.Default",
+        "Indexing.QueryClauseCache.Disabled",
+        "Indexing.QueryClauseCache.RepeatedQueriesTimeFrameInSec",
         "Indexing.Encrypted.TransactionSizeLimitInMb",
         "Indexing.IndexEmptyEntries",
         "Indexing.IndexMissingFieldsAsNull",
@@ -29,6 +31,7 @@ class configurationItem {
         "Indexing.NumberOfLargeSegmentsToMergeInSingleBatch",
         "Indexing.ScratchSpaceLimitInMb",
         "Indexing.Throttling.TimeIntervalInMs",
+        "Indexing.TimeSinceLastQueryAfterWhichDeepCleanupCanBeExecutedInMin",
         "Indexing.TransactionSizeLimitInMb"
     ];
     

@@ -35,10 +35,10 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var stats = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { "IdIndex" }));
-                Assert.Empty(stats[0].Errors);
+                var stats = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                Assert.Null(stats);
             }
         }
 
@@ -54,12 +54,9 @@ namespace SlowTests.Issues
                     session.Store(new User());
                     session.SaveChanges();
                 }
-
-                WaitForIndexing(store);
-                WaitForUserToContinueTheTest((store));
-
-                var stats = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { "MetadataIndex" }));
-                Assert.Empty(stats[0].Errors);
+                
+                var stats = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                Assert.Null(stats);
             }
         }
 
@@ -76,10 +73,10 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
-
-                var stats = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { "AsJsonIndex" }));
-                Assert.Empty(stats[0].Errors);
+                Indexes.WaitForIndexing(store);
+                
+                var stats = Indexes.WaitForIndexingErrors(store, errorsShouldExists: false);
+                Assert.Null(stats);
             }
         }
 
@@ -97,15 +94,17 @@ namespace SlowTests.Issues
                     Name = "Index"
                 }));
 
+                
+                
                 using (var session = store.OpenSession())
                 {
                     session.Store(new User());
                     session.SaveChanges();
                 }
+                
+                
 
-                WaitForIndexingErrors(store);
-
-                var stats = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { "Index" }));
+                var stats = Indexes.WaitForIndexingErrors(store);
                 Assert.NotEmpty(stats[0].Errors);
                 Assert.True(stats[0].Errors[0].Error.Contains("Id may only be called with a document"));
             }
@@ -131,9 +130,8 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexingErrors(store);
 
-                var stats = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { "Index" }));
+                var stats = Indexes.WaitForIndexingErrors(store);
                 Assert.NotEmpty(stats[0].Errors);
                 Assert.True(stats[0].Errors[0].Error.Contains("MetadataFor may only be called with a document"));
             }
@@ -158,10 +156,8 @@ namespace SlowTests.Issues
                     session.Store(new User());
                     session.SaveChanges();
                 }
-
-                WaitForIndexingErrors(store);
-
-                var stats = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { "Index" }));
+                
+                var stats = Indexes.WaitForIndexingErrors(store);
                 Assert.NotEmpty(stats[0].Errors);
                 Assert.True(stats[0].Errors[0].Error.Contains("AsJson may only be called with a document"));
             }

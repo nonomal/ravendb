@@ -1454,17 +1454,13 @@ namespace Raven.Client.Util
             }
         }
 
-        public class DateTimeSupport : JavascriptConversionExtension
+        public abstract class DateSupportBase<TDate> : JavascriptConversionExtension
         {
-            public static DateTimeSupport Instance = new DateTimeSupport();
-
-            private DateTimeSupport()
-            {
-            }
-
+            public abstract void ObjectParameterTranslator(string name, JavascriptWriter writer);
+            
             public override void ConvertToJavascript(JavascriptConversionContext context)
             {
-                if (context.Node is NewExpression newExp && newExp.Type == typeof(DateTime))
+                if (context.Node is NewExpression newExp && newExp.Type == typeof(TDate))
                 {
                     context.PreventDefault();
                     var writer = context.GetWriter();
@@ -1496,7 +1492,7 @@ namespace Raven.Client.Util
                 }
 
                 if (context.Node is BinaryExpression binaryExpression &&
-                    binaryExpression.Left.Type == typeof(DateTime))
+                    binaryExpression.Left.Type == typeof(TDate))
                 {
                     var writer = context.GetWriter();
                     context.PreventDefault();
@@ -1524,7 +1520,7 @@ namespace Raven.Client.Util
                 if (!(context.Node is MemberExpression node))
                     return;
 
-                if (node.Type == typeof(DateTime) && node.Expression == null)
+                if (node.Type == typeof(TDate) && node.Expression == null)
                 {
                     var writer = context.GetWriter();
                     context.PreventDefault();
@@ -1532,35 +1528,13 @@ namespace Raven.Client.Util
                     using (writer.Operation(node))
                     {
                         //match DateTime.Now , DateTime.UtcNow, DateTime.Today
-                        switch (node.Member.Name)
-                        {
-                            case "MinValue":
-                                writer.Write("new Date(-62135596800000)");
-                                break;
-
-                            case "MaxValue":
-                                writer.Write("new Date(253402297199999)");
-                                break;
-
-                            case "Now":
-                                writer.Write("new Date(Date.now())");
-                                break;
-
-                            case "UtcNow":
-                                writer.Write(
-                                    @"(function (date) { return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds(), date.getUTCMilliseconds());})(new Date())");
-                                break;
-
-                            case "Today":
-                                writer.Write("new Date(new Date().setHours(0,0,0,0))");
-                                break;
-                        }
+                        ObjectParameterTranslator(node.Member.Name, writer);
                     }
 
                     return;
                 }
 
-                if (node.Expression?.Type == typeof(DateTime) && node.Expression is MemberExpression memberExpression)
+                if (node.Expression?.Type == typeof(TDate) && node.Expression is MemberExpression memberExpression)
                 {
                     var writer = context.GetWriter();
                     context.PreventDefault();
@@ -1571,7 +1545,7 @@ namespace Raven.Client.Util
 
                         writer.Write("new Date(");
 
-                        if (memberExpression.Member.DeclaringType != typeof(DateTime))
+                        if (memberExpression.Member.DeclaringType != typeof(TDate))
                         {
                             writer.Write("Date.parse(");
                             context.Visitor.Visit(memberExpression.Expression);
@@ -1625,7 +1599,69 @@ namespace Raven.Client.Util
                 }
             }
         }
+        
+#if FEATURE_DATEONLY_TIMEONLY_SUPPORT
+        public class DateOnlySupport : DateSupportBase<DateOnly>
+        {
+            public static DateOnlySupport Instance = new DateOnlySupport();
+            
+            private DateOnlySupport()
+            {
+            }
+            
+            public override void ObjectParameterTranslator(string name, JavascriptWriter writer)
+            {
+                // Default values from DateOnly struct.
+                switch (name)
+                {
+                    case "MinValue":
+                        writer.Write($"new Date(-62135596800000)");
+                        break;
 
+                    case "MaxValue":
+                        writer.Write("new Date('9999, 12, 31')");
+                        break;
+                }
+            }
+        }
+#endif
+        
+        public class DateTimeSupport : DateSupportBase<DateTime>
+        {
+            public static DateTimeSupport Instance = new DateTimeSupport();
+
+            private DateTimeSupport()
+            {
+            }
+            
+            public override void ObjectParameterTranslator(string name, JavascriptWriter writer)
+            {
+                switch (name)
+                {
+                    case "MinValue":
+                        writer.Write("new Date(-62135596800000)");
+                        break;
+
+                    case "MaxValue":
+                        writer.Write("new Date(253402297199999)");
+                        break;
+
+                    case "Now":
+                        writer.Write("new Date(Date.now())");
+                        break;
+
+                    case "UtcNow":
+                        writer.Write(
+                            @"(function (date) { return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds(), date.getUTCMilliseconds());})(new Date())");
+                        break;
+
+                    case "Today":
+                        writer.Write("new Date(new Date().setHours(0,0,0,0))");
+                        break;
+                }
+            }
+        }
+        
         public class TimeSpanSupport : JavascriptConversionExtension
         {
             public static TimeSpanSupport Instance = new TimeSpanSupport();
@@ -2490,15 +2526,17 @@ namespace Raven.Client.Util
         public class IdentityPropertySupport : JavascriptConversionExtension
         {
             private readonly DocumentConventions _conventions;
+            private readonly string _parameterName;
 
-            public IdentityPropertySupport(DocumentConventions conventions)
+            public IdentityPropertySupport(DocumentConventions conventions, string parameterName = null)
             {
                 _conventions = conventions;
+                _parameterName = parameterName;
             }
 
             public override void ConvertToJavascript(JavascriptConversionContext context)
             {
-                if (CanConvert(context.Node, _conventions, out var innerExpression) == false)
+                if (CanConvert(context.Node, _conventions, _parameterName, out var innerExpression) == false)
                     return;
 
                 var writer = context.GetWriter();
@@ -2516,7 +2554,7 @@ namespace Raven.Client.Util
                 }
             }
 
-            private static bool CanConvert(Expression expression, DocumentConventions conventions, out Expression innerExpression)
+            private static bool CanConvert(Expression expression, DocumentConventions conventions, string parameterName, out Expression innerExpression)
             {
                 innerExpression = null;
 
@@ -2536,8 +2574,7 @@ namespace Raven.Client.Util
                 innerExpression = innerMember;
 
                 var p = GetParameter(innerMember)?.Name;
-
-                return p != null && p.StartsWith(TransparentIdentifier);
+                return p != null && (p.StartsWith(TransparentIdentifier) || p == parameterName);
             }
         }
 
@@ -2583,6 +2620,35 @@ namespace Raven.Client.Util
                 }
             }
         }
+
+        public class TypedParameterSupport : JavascriptConversionExtension
+        {
+            public readonly string Name;
+
+            public TypedParameterSupport(string name)
+            {
+                if (string.IsNullOrEmpty(name))
+                    throw new ArgumentNullException(nameof(name));
+
+                Name = name;
+            }
+
+            public override void ConvertToJavascript(JavascriptConversionContext context)
+            {
+                if (!(context.Node is MemberExpression memberExpression) || 
+                    !(memberExpression.Expression is ParameterExpression parameter) ||
+                    parameter.Name != Name) 
+                    return;
+                
+                context.PreventDefault();
+                var writer = context.GetWriter();
+                using (writer.Operation(memberExpression))
+                {
+                    writer.Write(memberExpression);
+                }
+            }
+        }
+
 
         public static ParameterExpression GetParameter(MemberExpression expression)
         {

@@ -94,7 +94,7 @@ namespace FastTests.Client.Indexing
                     .Maintenance
                     .SendAsync(new PutIndexesOperation(new[] { input2 }));
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
                 var output2 = await store
                      .Maintenance
@@ -161,7 +161,7 @@ namespace FastTests.Client.Indexing
                         .Maintenance
                         .SendAsync(new StartIndexingOperation(), cts.Token);
 
-                    WaitForIndexing(store);
+                    Indexes.WaitForIndexing(store);
 
                     var output2 = await store
                         .Maintenance
@@ -204,11 +204,9 @@ namespace FastTests.Client.Indexing
                     .Maintenance
                     .SendAsync(new StartIndexingOperation());
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var errors = store.Maintenance.Send(new GetIndexErrorsOperation());
-
-                Assert.Equal(0, errors[0].Errors.Length);
+                Assert.Null(Indexes.WaitForIndexingErrors(store, errorsShouldExists: false));
             }
         }
     }

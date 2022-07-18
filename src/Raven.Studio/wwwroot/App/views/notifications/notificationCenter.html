@@ -23,9 +23,14 @@
         <h2 class="text-center text-muted">No new notifications</h2>
     </div>
     <div class="notification-list scroll" data-bind="if: includeInDom">
-        <!-- ko foreach: visibleNotifications-->
-        <div data-bind="template: { name: type + '-template' }"></div>
-        <!-- /ko -->
+        <div data-bind="foreach: notificationsToShow">
+            <div data-bind="template: { name: type + '-template' }"></div>
+        </div>
+        <div class="text-center" data-bind="visible: visibleNotifications().length > constructor.numberOfNotificationsToShow && !isShowingAllNotifications()">
+            <button class="btn btn-danger margin-top-xs" data-bind="click: showAllNotifications">
+                Show all notifications
+            </button>
+        </div>
     </div>
 </div>
 
@@ -114,7 +119,7 @@
                 </div>
             </div>
             <div data-bind="if: customControl">
-                <div data-bind="compose: customControl"></div>
+                <div data-bind="compose: { model: customControl }"></div>
             </div>
         </div>
     </div>

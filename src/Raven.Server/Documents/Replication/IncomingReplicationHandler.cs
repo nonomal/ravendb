@@ -14,9 +14,12 @@ using Raven.Client.Documents.Operations.Attachments;
 using Raven.Client.Documents.Operations.Replication;
 using Raven.Client.Documents.Replication;
 using Raven.Client.Documents.Replication.Messages;
+using Raven.Client.Exceptions;
+using Raven.Client.Exceptions.Documents;
 using Raven.Client.Extensions;
 using Raven.Client.ServerWide.Tcp;
 using Raven.Client.Util;
+using Raven.Server.Documents.Handlers;
 using Raven.Server.Documents.Replication.ReplicationItems;
 using Raven.Server.Documents.TcpHandlers;
 using Raven.Server.Documents.TimeSeries;
@@ -53,6 +56,8 @@ namespace Raven.Server.Documents.Replication
         public event Action<IncomingReplicationHandler, Exception> Failed;
 
         public event Action<IncomingReplicationHandler> DocumentsReceived;
+        
+        public event Action<IncomingReplicationHandler,int> AttachmentStreamsReceived;
 
         public event Action<LiveReplicationPulsesCollector.ReplicationPulse> HandleReplicationPulse;
 
@@ -77,11 +82,14 @@ namespace Raven.Server.Documents.Replication
 
         private readonly DisposeOnce<SingleAttempt> _disposeOnce;
 
+        public readonly ReplicationLatestEtagRequest.ReplicationType ReplicationType;
+
         public IncomingReplicationHandler(
             TcpConnectionOptions options,
             ReplicationLatestEtagRequest replicatedLastEtag,
             ReplicationLoader parent,
             JsonOperationContext.MemoryBuffer bufferToCopy,
+            ReplicationLatestEtagRequest.ReplicationType replicationType,
             ReplicationLoader.PullReplicationParams pullReplicationParams = null)
         {
             if (pullReplicationParams?.AllowedPaths != null && pullReplicationParams.AllowedPaths.Length > 0)
@@ -101,6 +109,8 @@ namespace Raven.Server.Documents.Replication
             SupportedFeatures = TcpConnectionHeaderMessage.GetSupportedFeaturesFor(options.Operation, options.ProtocolVersion);
             ConnectionInfo.RemoteIp = ((IPEndPoint)_tcpClient.Client.RemoteEndPoint).Address.ToString();
             _parent = parent;
+
+            ReplicationType = replicationType;
 
             _incomingPullReplicationParams = new ReplicationLoader.PullReplicationParams
             {
@@ -458,6 +468,8 @@ namespace Raven.Server.Documents.Replication
 
             ReceiveSingleDocumentsBatch(documentsContext, itemsCount, attachmentStreamCount, lastDocumentEtag, stats);
 
+            AttachmentStreamsReceived?.Invoke(this, attachmentStreamCount);
+
             OnDocumentsReceived(this);
         }
 
@@ -533,6 +545,8 @@ namespace Raven.Server.Documents.Replication
                         ReadItemsFromSource(replicatedItemsCount, documentsContext, dataForReplicationCommand, reader, networkStats);
                         ReadAttachmentStreamsFromSource(attachmentStreamCount, documentsContext, dataForReplicationCommand, reader, networkStats);
                     }
+
+                    _parent._server.DatabasesLandlord.ForTestingPurposes?.DelayIncomingReplication?.Invoke(_cts.Token);
 
                     if (_allowedPathsValidator != null || _preventIncomingSinkDeletions)
                     {
@@ -622,7 +636,7 @@ namespace Raven.Server.Documents.Replication
         private void ValidateIncomingReplicationItemsPaths(DataForReplicationCommand dataForReplicationCommand)
         {
             HashSet<Slice> expectedAttachmentStreams = null;
-            
+
             foreach (var item in dataForReplicationCommand.ReplicatedItems)
             {
                 if (_allowedPathsValidator != null)
@@ -886,6 +900,13 @@ namespace Raven.Server.Documents.Replication
                 _lastReplicationStats.TryDequeue(out stats);
         }
 
+        public LiveReplicationPerformanceCollector.ReplicationPerformanceType GetReplicationPerformanceType()
+        {
+            return ReplicationType == ReplicationLatestEtagRequest.ReplicationType.Internal
+                ? LiveReplicationPerformanceCollector.ReplicationPerformanceType.IncomingInternal
+                : LiveReplicationPerformanceCollector.ReplicationPerformanceType.IncomingExternal;
+        }
+
         public bool IsDisposed => _disposeOnce.Disposed;
 
         public void Dispose()
@@ -1013,7 +1034,7 @@ namespace Raven.Server.Documents.Replication
                     return operationsCount;
 
                 operationsCount++;
-                
+
                 context.LastDatabaseChangeVector = ChangeVectorUtils.MergeVectors(current, _changeVector);
                 context.Transaction.InnerTransaction.LowLevelTransaction.OnDispose += _ =>
                 {
@@ -1061,10 +1082,10 @@ namespace Raven.Server.Documents.Replication
 
             public void BeforeSendingToTxMerger(PreventDeletionsMode? preventDeletionsMode, DocumentsOperationContext ctx)
             {
-                if(preventDeletionsMode?.HasFlag(PreventDeletionsMode.PreventSinkToHubDeletions) == false ||
+                if (preventDeletionsMode?.HasFlag(PreventDeletionsMode.PreventSinkToHubDeletions) == false ||
                                       _mode != PullReplicationMode.SinkToHub)
                     return;
-                
+
                 foreach (var item in _replicationInfo.ReplicatedItems)
                 {
                     if (item is DocumentReplicationItem doc)
@@ -1092,6 +1113,7 @@ namespace Raven.Server.Documents.Replication
                     HashSet<LazyStringValue> docCountersToRecreate = null;
                     var handledAttachmentStreams = new HashSet<Slice>(SliceComparer.Instance);
                     context.LastDatabaseChangeVector ??= DocumentsStorage.GetDatabaseChangeVector(context);
+
                     foreach (var item in _replicationInfo.ReplicatedItems)
                     {
                         if (lastTransactionMarker != item.TransactionMarker)
@@ -1102,12 +1124,12 @@ namespace Raven.Server.Documents.Replication
 
                         operationsCount++;
 
-                        if (_isSink) 
+                        if (_isSink)
                             ReplaceKnownSinkEntries(context, ref item.ChangeVector);
 
                         var changeVectorToMerge = item.ChangeVector;
 
-                        if (_isHub) 
+                        if (_isHub)
                             changeVectorToMerge = ReplaceUnknownEntriesWithSinkTag(context, ref item.ChangeVector);
 
                         var rcvdChangeVector = item.ChangeVector;
@@ -1123,13 +1145,13 @@ namespace Raven.Server.Documents.Replication
                             case AttachmentReplicationItem attachment:
 
                                 var localAttachment = database.DocumentsStorage.AttachmentsStorage.GetAttachmentByKey(context, attachment.Key);
-                                if (_replicationInfo.ReplicatedAttachmentStreams.TryGetValue(attachment.Base64Hash, out var attachmentStream))
+                                if (_replicationInfo.ReplicatedAttachmentStreams?.TryGetValue(attachment.Base64Hash, out var attachmentStream) == true)
                                 {
                                     if (database.DocumentsStorage.AttachmentsStorage.AttachmentExists(context, attachment.Base64Hash) == false)
                                     {
-                                            Debug.Assert(localAttachment == null || AttachmentsStorage.GetAttachmentTypeByKey(attachment.Key) != AttachmentType.Revision,
-                                                "the stream should have been written when the revision was added by the document");
-                                            database.DocumentsStorage.AttachmentsStorage.PutAttachmentStream(context, attachment.Key, attachmentStream.Base64Hash, attachmentStream.Stream);
+                                        Debug.Assert(localAttachment == null || AttachmentsStorage.GetAttachmentTypeByKey(attachment.Key) != AttachmentType.Revision,
+                                            "the stream should have been written when the revision was added by the document");
+                                        database.DocumentsStorage.AttachmentsStorage.PutAttachmentStream(context, attachment.Key, attachmentStream.Base64Hash, attachmentStream.Stream);
                                     }
 
                                     handledAttachmentStreams.Add(attachment.Base64Hash);
@@ -1210,6 +1232,21 @@ namespace Raven.Server.Documents.Replication
                             case TimeSeriesReplicationItem segment:
                                 tss = database.DocumentsStorage.TimeSeriesStorage;
                                 TimeSeriesValuesSegment.ParseTimeSeriesKey(segment.Key, context, out docId, out _, out var baseline);
+                                if (_replicationInfo.SupportedFeatures.Replication.IncrementalTimeSeries == false &&
+                                    TimeSeriesHandler.CheckIfIncrementalTs(segment.Name))
+                                {
+                                    var msg = $"Detected an item of type Incremental-TimeSeries : '{segment.Name}' on document '{docId}', " +
+                                              $"while replication protocol version '{_replicationInfo.SupportedFeatures.ProtocolVersion}' does not support Incremental-TimeSeries feature.";
+                                    
+                                    database.NotificationCenter.Add(AlertRaised.Create(
+                                        database.Name,
+                                        "Incoming Replication",
+                                        msg,
+                                        AlertType.Replication,
+                                        NotificationSeverity.Error));
+
+                                    throw new LegacyReplicationViolationException(msg);
+                                }
                                 UpdateTimeSeriesNameIfNeeded(context, docId, segment, tss);
 
                                 if (tss.TryAppendEntireSegment(context, segment, docId, segment.Name, baseline))
@@ -1218,9 +1255,15 @@ namespace Raven.Server.Documents.Replication
                                     context.LastDatabaseChangeVector = ChangeVectorUtils.MergeVectors(databaseChangeVector, segment.ChangeVector);
                                     continue;
                                 }
+                                
+                                var options = new TimeSeriesStorage.AppendOptions
+                                {
+                                    VerifyName = false,
+                                    ChangeVectorFromReplication = segment.ChangeVector
+                                };
 
                                 var values = segment.Segment.YieldAllValues(context, context.Allocator, baseline);
-                                var changeVector = tss.AppendTimestamp(context, docId, segment.Collection, segment.Name, values, segment.ChangeVector, verifyName: false);
+                                var changeVector = tss.AppendTimestamp(context, docId, segment.Collection, segment.Name, values, options);
                                 context.LastDatabaseChangeVector = ChangeVectorUtils.MergeVectors(changeVector, segment.ChangeVector);
 
                                 break;
@@ -1306,8 +1349,15 @@ namespace Raven.Server.Documents.Replication
                                                 }
                                             }
 
-                                            database.DocumentsStorage.Put(context, doc.Id, null, resolvedDocument, doc.LastModifiedTicks,
-                                                rcvdChangeVector, null, flags, nonPersistentFlags);
+                                            try
+                                            {
+                                                database.DocumentsStorage.Put(context, doc.Id, null, resolvedDocument, doc.LastModifiedTicks,
+                                                    rcvdChangeVector, null, flags, nonPersistentFlags);
+                                            }
+                                            catch (DocumentCollectionMismatchException)
+                                            {
+                                                goto case ConflictStatus.Conflict;
+                                            }
                                         }
                                         else
                                         {
@@ -1383,7 +1433,7 @@ namespace Raven.Server.Documents.Replication
                     //context.LastDatabaseChangeVector being an empty string is valid in the case of receiving docs into
                     //an empty database via filtered pull replication, since it does not modify the db's change vector
                     Debug.Assert(context.LastDatabaseChangeVector != null, $"database: {context.DocumentDatabase.Name};");
-                    
+
                     // instead of : SetLastReplicatedEtagFrom -> _incoming.ConnectionInfo.SourceDatabaseId, _lastEtag , we will store in context and write once right before commit (one time instead of repeating on all docs in the same Tx)
                     if (context.LastReplicationEtagFrom == null)
                         context.LastReplicationEtagFrom = new Dictionary<string, long>();
@@ -1446,8 +1496,8 @@ namespace Raven.Server.Documents.Replication
 
                 changeVector = newIncoming.SerializeVector();
 
-                return knownEntries.Count > 0 ? 
-                    knownEntries.SerializeVector() : 
+                return knownEntries.Count > 0 ?
+                    knownEntries.SerializeVector() :
                     null;
             }
 

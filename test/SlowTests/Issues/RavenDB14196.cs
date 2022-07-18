@@ -26,12 +26,10 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
                 WaitForUserToContinueTheTest(store);
 
-                var indexErrors = store.Maintenance.Send(new GetIndexErrorsOperation());
-                var errors = indexErrors.SelectMany(e => e.Errors).Select(e => e.Error);
-                Assert.Empty(errors);
+                Assert.Null(Indexes.WaitForIndexingErrors(store, errorsShouldExists: false));
             }
         }
     }

@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using Esprima;
 using Esprima.Ast;
+using Nest;
 using Raven.Client;
 using Raven.Client.Documents.Commands.Batches;
 using Raven.Client.Documents.Indexes;
@@ -52,7 +53,7 @@ namespace Raven.Server.Documents.Queries
         {
         }
 
-        private static Query ParseQuery(string q, QueryType queryType, DocumentDatabase database = null)
+        internal static Query ParseQuery(string q, QueryType queryType, DocumentDatabase database = null)
         {
             var qp = new QueryParser();
             qp.Init(q, database?.DocumentsStorage);
@@ -71,6 +72,11 @@ namespace Raven.Server.Documents.Queries
             IsGraph = Query.GraphQuery != null;
             IsDistinct = Query.IsDistinct;
             IsGroupBy = Query.GroupBy != null;
+            
+            if (query.Filter != null)
+            {
+                BuildFilterScript(query);
+            }
 
             if (IsGraph == false)
             {
@@ -102,6 +108,45 @@ namespace Raven.Server.Documents.Queries
             CreatedAt = DateTime.UtcNow;
             LastQueriedAt = CreatedAt;
         }
+
+        private void BuildFilterScript(Query query)
+        {
+            var stringBuilder = new StringBuilder();
+            stringBuilder.AppendLine(@"
+function __actual_func(args) {
+    Raven_ExplodeArgs(this, args);");
+
+            if (query.From.Alias != null)
+            {
+                stringBuilder.Append("  var ").Append(query.From.Alias.Value.Value).AppendLine(" = this;");
+            }
+
+            var queryVisitor = new JavascriptCodeQueryVisitor(stringBuilder, Query);
+            if (query.Load != null)
+            {
+                foreach (var (expr, alias) in query.Load)
+                {
+                    stringBuilder.Append("  var ").Append(alias.Value.Value).Append(" = load(");
+                    queryVisitor.VisitExpression(expr);
+                    stringBuilder.AppendLine(");");
+                }
+            }
+
+            stringBuilder.Append("  return ");
+            queryVisitor.VisitExpression(query.Filter);
+
+            stringBuilder.Append(@";
+
+}
+
+function execute(doc, args){
+    return __actual_func.call(doc, args);
+}
+");
+            FilterScript = stringBuilder.ToString();
+        }
+
+        public string FilterScript;
 
         public readonly bool AddSpatialProperties;
 
@@ -1469,6 +1514,26 @@ namespace Raven.Server.Documents.Queries
                         return methodField;
                     }
 
+                    if (string.Equals("getMetadata", methodName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (HasFacet)
+                            ThrowFacetQueryMustContainsOnlyFacetInSelect(me, parameters);
+
+                        if (HasSuggest)
+                            ThrowSuggestionQueryMustContainsOnlySuggestInSelect(me, parameters);
+
+                        if (me.Arguments.Count != 1 || !(me.Arguments[0] is FieldExpression argumentExpression))
+                        {
+                            ThrowInvalidArgumentToGetMetadata(parameters);
+                            return null; // never hit
+                        }
+
+                        if (RootAliasPaths.ContainsKey(argumentExpression.FieldValue) == false)
+                            ThrowUnknownAlias(argumentExpression.FieldValue, parameters);
+
+                        return SelectField.CreateMethodCall("getMetadata", alias, ConvertSelectArguments(parameters, alias, me, methodName));
+                    }
+
                     if (IsGroupBy == false)
                         ThrowUnknownMethodInSelect(methodName, QueryText, parameters);
 
@@ -2004,6 +2069,11 @@ namespace Raven.Server.Documents.Queries
         private void ThrowCounterInvalidArgument(string methodName, QueryExpression expression, BlittableJsonReaderObject parameters)
         {
             throw new InvalidQueryException($"Invalid argument of type {expression.GetType().Name} specified as an argument of {methodName}(). Text: {expression.GetText(null)}.", QueryText, parameters);
+        }
+
+        private void ThrowInvalidArgumentToGetMetadata(BlittableJsonReaderObject parameters)
+        {
+            throw new InvalidQueryException("getMetadata(doc) must be called with a single entity argument", QueryText, parameters);
         }
 
         private class FillWhereFieldsAndParametersVisitor : WhereExpressionVisitor

@@ -18,6 +18,7 @@ using Raven.Server.Documents.Queries.Timings;
 using Raven.Server.Exceptions;
 using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Context;
+using Raven.Server.Utils.Features;
 using Sparrow;
 using Sparrow.Json;
 using Sparrow.Json.Parsing;
@@ -105,7 +106,7 @@ namespace Raven.Server.Documents.Queries
             return await ExecuteQuery(res, query, queryContext, existingResultEtag, token);
         }
 
-        public override Task ExecuteStreamIndexEntriesQuery(IndexQueryServerSide query, QueryOperationContext queryContext, HttpResponse response, IStreamQueryResultWriter<BlittableJsonReaderObject> writer,
+        public override Task ExecuteStreamIndexEntriesQuery(IndexQueryServerSide query, QueryOperationContext queryContext, HttpResponse response, IStreamQueryResultWriter<BlittableJsonReaderObject> writer, bool ignoreLimit,
             OperationCancelToken token)
         {
             throw new NotImplementedException();
@@ -115,8 +116,7 @@ namespace Raven.Server.Documents.Queries
         {
             try
             {
-                if (Database.ServerStore.Configuration.Core.FeaturesAvailability == FeaturesAvailability.Stable)
-                    FeaturesAvailabilityException.Throw("Graph Queries");
+                Database.ServerStore.FeatureGuardian.Assert(Feature.GraphApi);
 
                 using (QueryRunner.MarkQueryAsRunning(Constants.Documents.Indexing.DummyGraphIndexName, query, token))
                 using (var timingScope = new QueryTimingsScope())
@@ -168,7 +168,7 @@ namespace Raven.Server.Documents.Queries
                             if (match.Empty)
                                 continue;
 
-                            var result = resultRetriever.ProjectFromMatch(match, queryContext.Documents);
+                            var result = resultRetriever.ProjectFromMatch(match, queryContext.Documents, token.Token);
                             // ReSharper disable once PossibleNullReferenceException
                             if (q.IsDistinct && alreadySeenProjections.Add(result.DataHash) == false)
                                 continue;
@@ -338,7 +338,7 @@ namespace Raven.Server.Documents.Queries
             throw new NotSupportedException("You cannot delete based on graph query");
         }
 
-        public override Task<IndexEntriesQueryResult> ExecuteIndexEntriesQuery(IndexQueryServerSide query, QueryOperationContext queryContext, long? existingResultEtag, OperationCancelToken token)
+        public override Task<IndexEntriesQueryResult> ExecuteIndexEntriesQuery(IndexQueryServerSide query, QueryOperationContext queryContext, bool ignoreLimit, long? existingResultEtag, OperationCancelToken token)
         {
             throw new NotSupportedException("Graph queries do not expose index queries");
         }

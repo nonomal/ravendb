@@ -35,14 +35,17 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var errors = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { index.IndexName }))
+                var errors = Indexes.WaitForIndexingErrors(store, new[] { index.IndexName }, errorsShouldExists: false)?
                     .SelectMany(e => e.Errors)
                     .Select(e => e.Error)
                     .ToArray();
-                var errorsString = string.Join("\n", errors);
-                Assert.DoesNotContain("Failed to execute mapping function", errorsString);
+                if (errors is not null)
+                {
+                    var errorsString = string.Join("\n", errors);
+                    Assert.DoesNotContain("Failed to execute mapping function", errorsString);
+                }
 
                 using (var session = store.OpenSession())
                 {
@@ -77,14 +80,17 @@ namespace SlowTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForIndexing(store);
+                Indexes.WaitForIndexing(store);
 
-                var errors = store.Maintenance.Send(new GetIndexErrorsOperation(new[] { index.IndexName }))
+                var errors = Indexes.WaitForIndexingErrors(store, new[] { index.IndexName }, errorsShouldExists: false)?
                     .SelectMany(e => e.Errors)
                     .Select(e => e.Error)
                     .ToArray();
-                var errorsString = string.Join("\n", errors);
-                Assert.DoesNotContain("Failed to execute mapping function", errorsString);
+                if (errors is not null)
+                {
+                    var errorsString = string.Join("\n", errors);
+                    Assert.DoesNotContain("Failed to execute mapping function", errorsString);
+                }
 
                 using (var session = store.OpenSession())
                 {

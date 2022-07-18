@@ -47,6 +47,7 @@ using Size = Sparrow.Size;
 
 #if !RVN
 using SizeClient = Raven.Client.Util.Size;
+using NativeMemory = Sparrow.Utils.NativeMemory;
 #endif
 
 namespace Raven.Server.Utils.Cli
@@ -577,7 +578,7 @@ namespace Raven.Server.Utils.Cli
 
         private static bool CommandInfo(List<string> args, RavenCli cli)
         {
-            new ClusterMessage(Console.Out, cli._server.ServerStore).Print();
+            new ClusterMessage(Console.Out, cli._server.ServerStore.Engine.Tag, cli._server.ServerStore.Engine.ClusterId).Print();
 
             WriteText(GetInfoText(), ConsoleColor.Cyan, cli);
 
@@ -688,7 +689,8 @@ namespace Raven.Server.Utils.Cli
                     SecurityClearance = SecurityClearance.ClusterNode,
                     Thumbprint = cert.Thumbprint,
                     PublicKeyPinningHash = cert.GetPublicKeyPinningHash(),
-                    NotAfter = cert.NotAfter
+                    NotAfter = cert.NotAfter,
+                    NotBefore = cert.NotBefore
                 };
 
                 try
@@ -775,7 +777,8 @@ namespace Raven.Server.Utils.Cli
                     SecurityClearance = SecurityClearance.ClusterAdmin,
                     Thumbprint = cert.Thumbprint,
                     PublicKeyPinningHash = cert.GetPublicKeyPinningHash(),
-                    NotAfter = cert.NotAfter
+                    NotAfter = cert.NotAfter,
+                    NotBefore = cert.NotBefore
                 };
 
                 try

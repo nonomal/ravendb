@@ -44,7 +44,6 @@ namespace Raven.Client.Documents.Subscriptions
     public class SubscriptionWorker<T> : IAsyncDisposable, IDisposable where T : class
     {
         public delegate Task AfterAcknowledgmentAction(SubscriptionBatch<T> batch);
-
         private readonly Logger _logger;
         private readonly DocumentStore _store;
         private readonly string _dbName;
@@ -57,11 +56,14 @@ namespace Raven.Client.Documents.Subscriptions
         private Stream _stream;
         private int _forcedTopologyUpdateAttempts = 0;
 
+        public string WorkerId => _options.WorkerId;
         /// <summary>
         /// Allows the user to define stuff that happens after the confirm was received from the server
         /// (this way we know we won't get those documents again)
         /// </summary>
         public event AfterAcknowledgmentAction AfterAcknowledgment;
+
+        internal event Action OnEstablishedSubscriptionConnection;
 
         public event Action<Exception> OnSubscriptionConnectionRetry;
 
@@ -112,7 +114,11 @@ namespace Raven.Client.Documents.Subscriptions
                 {
                     try
                     {
-                        await _subscriptionTask.ConfigureAwait(false);
+                        if (await _subscriptionTask.WaitWithTimeout(TimeSpan.FromSeconds(60)).ConfigureAwait(false) == false)
+                        {
+                            if (_logger.IsInfoEnabled)
+                                _logger.Info($"Subscription worker for '{SubscriptionName}' wasn't done after 60 seconds, cannot hold subscription disposal any longer.");
+                        }
                     }
                     catch (Exception)
                     {
@@ -272,7 +278,7 @@ namespace Raven.Client.Documents.Subscriptions
             bool compressionSupport = false;
 #if NETCOREAPP3_1_OR_GREATER
             var version = SubscriptionTcpVersion ?? TcpConnectionHeaderMessage.SubscriptionTcpVersion;
-            if (version >= 53_000)
+            if (version >= 53_000 && (_store.Conventions.DisableTcpCompression == false))
                 compressionSupport = true;
 #endif
 
@@ -285,7 +291,10 @@ namespace Raven.Client.Documents.Subscriptions
                 DestinationNodeTag = CurrentNodeTag,
                 DestinationUrl = chosenUrl,
                 DestinationServerId = tcpInfo.ServerId,
-                CompressionSupport = compressionSupport
+                LicensedFeatures = new LicensedFeatures
+                {
+                    DataCompression = compressionSupport
+                }
             };
 
             return await TcpNegotiation.NegotiateProtocolVersionAsync(context, stream, parameters).ConfigureAwait(false);
@@ -325,7 +334,7 @@ namespace Raven.Client.Documents.Subscriptions
             return tcpCommand.Result;
         }
 
-        private async ValueTask<int> ReadServerResponseAndGetVersionAsync(JsonOperationContext context, AsyncBlittableJsonTextWriter writer, Stream stream, string destinationUrl)
+        private async ValueTask<TcpConnectionHeaderMessage.NegotiationResponse> ReadServerResponseAndGetVersionAsync(JsonOperationContext context, AsyncBlittableJsonTextWriter writer, Stream stream, string destinationUrl)
         {
             //Reading reply from server
             using (var response = await context.ReadForMemoryAsync(stream, "Subscription/tcp-header-response").ConfigureAwait(false))
@@ -335,7 +344,11 @@ namespace Raven.Client.Documents.Subscriptions
                 switch (reply.Status)
                 {
                     case TcpConnectionStatus.Ok:
-                        return reply.Version;
+                        return new TcpConnectionHeaderMessage.NegotiationResponse
+                        {
+                            Version = reply.Version, 
+                            LicensedFeatures = reply.LicensedFeatures
+                        };
 
                     case TcpConnectionStatus.AuthorizationFailed:
                         throw new AuthorizationException($"Cannot access database {_dbName} because " + reply.Message);
@@ -343,7 +356,11 @@ namespace Raven.Client.Documents.Subscriptions
                     case TcpConnectionStatus.TcpVersionMismatch:
                         if (reply.Version != TcpNegotiation.OutOfRangeStatus)
                         {
-                            return reply.Version;
+                            return new TcpConnectionHeaderMessage.NegotiationResponse
+                            {
+                                Version = reply.Version,
+                                LicensedFeatures = reply.LicensedFeatures
+                            };
                         }
                         //Kindly request the server to drop the connection
                         await SendDropMessageAsync(context, writer, reply).ConfigureAwait(false);
@@ -352,7 +369,12 @@ namespace Raven.Client.Documents.Subscriptions
                     case TcpConnectionStatus.InvalidNetworkTopology:
                         throw new InvalidNetworkTopologyException($"Failed to connect to url {destinationUrl} because: {reply.Message}");
                 }
-                return reply.Version;
+
+                return new TcpConnectionHeaderMessage.NegotiationResponse
+                {
+                    Version = reply.Version,
+                    LicensedFeatures = reply.LicensedFeatures
+                };
             }
         }
 
@@ -377,9 +399,16 @@ namespace Raven.Client.Documents.Subscriptions
                 if (connectionStatus.Exception.Contains(nameof(DatabaseDoesNotExistException)))
                     DatabaseDoesNotExistException.ThrowWithMessage(_dbName, connectionStatus.Message);
             }
+
             if (connectionStatus.Type != SubscriptionConnectionServerMessage.MessageType.ConnectionStatus)
-                throw new Exception("Server returned illegal type message when expecting connection status, was: " +
-                                    connectionStatus.Type);
+            {
+                var message = "Server returned illegal type message when expecting connection status, was: " + connectionStatus.Type;
+
+                if (connectionStatus.Type == SubscriptionConnectionServerMessage.MessageType.Error)
+                    message += $". Exception: {connectionStatus.Exception}";
+
+                throw new SubscriptionMessageTypeException(message);
+            }
 
             switch (connectionStatus.Status)
             {
@@ -388,7 +417,7 @@ namespace Raven.Client.Documents.Subscriptions
 
                 case SubscriptionConnectionServerMessage.ConnectionStatus.InUse:
                     throw new SubscriptionInUseException(
-                        $"Subscription With Id '{_options.SubscriptionName}' cannot be opened, because it's in use and the connection strategy is {_options.Strategy}");
+                            $"Subscription With Id '{_options.SubscriptionName}' cannot be opened, because it's in use and the connection strategy is {_options.Strategy}");
                 case SubscriptionConnectionServerMessage.ConnectionStatus.Closed:
                     bool canReconnect = false;
                     connectionStatus.Data?.TryGet(nameof(SubscriptionClosedException.CanReconnect), out canReconnect);
@@ -400,6 +429,22 @@ namespace Raven.Client.Documents.Subscriptions
                     throw new SubscriptionDoesNotExistException(
                         $"Subscription With Id '{_options.SubscriptionName}' cannot be opened, because it does not exist. " + connectionStatus.Exception);
                 case SubscriptionConnectionServerMessage.ConnectionStatus.Redirect:
+                    if (_options.Strategy == SubscriptionOpeningStrategy.WaitForFree)
+                    {
+                        if (connectionStatus.Data != null && connectionStatus.Data.TryGetMember(
+                                nameof(SubscriptionConnectionServerMessage.SubscriptionRedirectData.RegisterConnectionDurationInTicks), out object registerConnectionDurationInTicksObject))
+                        {
+                            if (registerConnectionDurationInTicksObject is long registerConnectionDurationInTicks)
+                            {
+                                if (TimeSpan.FromTicks(registerConnectionDurationInTicks) >= _options.MaxErroneousPeriod)
+                                {
+                                    // this worker connection Waited For Free for more than MaxErroneousPeriod
+                                    _lastConnectionFailure = null;
+                                }
+                            }
+                        }
+                    }
+
                     var appropriateNode = connectionStatus.Data?[nameof(SubscriptionConnectionServerMessage.SubscriptionRedirectData.RedirectedTag)]?.ToString();
                     var currentNode = connectionStatus.Data?[nameof(SubscriptionConnectionServerMessage.SubscriptionRedirectData.CurrentTag)]?.ToString();
                     var rawReasons = connectionStatus.Data?[nameof(SubscriptionConnectionServerMessage.SubscriptionRedirectData.Reasons)];
@@ -459,6 +504,8 @@ namespace Raven.Client.Documents.Subscriptions
                     _lastConnectionFailure = null;
                     if (_processingCts.IsCancellationRequested)
                         return;
+
+                    OnEstablishedSubscriptionConnection?.Invoke();
 
                     Task notifiedSubscriber = Task.CompletedTask;
 
@@ -715,7 +762,7 @@ namespace Raven.Client.Documents.Subscriptions
                         }
                         if (ShouldTryToReconnect(ex))
                         {
-                            await TimeoutManager.WaitFor(_options.TimeToWaitBeforeConnectionRetry).ConfigureAwait(false);
+                            await TimeoutManager.WaitFor(_options.TimeToWaitBeforeConnectionRetry, _processingCts.Token).ConfigureAwait(false);
 
                             if (_redirectNode == null)
                             {
@@ -827,6 +874,9 @@ namespace Raven.Client.Documents.Subscriptions
 
                     _processingCts.Cancel();
                     return false;
+
+                case SubscriptionMessageTypeException _:
+                    goto default;
 
                 case SubscriptionInUseException _:
                 case SubscriptionDoesNotExistException _:

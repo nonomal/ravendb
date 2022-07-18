@@ -38,7 +38,7 @@ function BuildEmbeddedNuget ($projectDir, $outDir, $serverSrcDir, $studioZipPath
     $EMBEDDED_OUT_DIR = [io.path]::combine($outDir, "RavenDB.Embedded")
     $EMBEDDED_BUILD_OUT_DIR = [io.path]::combine($EMBEDDED_OUT_DIR, "build")
     $EMBEDDED_SERVER_OUT_DIR = [io.path]::combine($EMBEDDED_OUT_DIR, "contentFiles", "any", "any")
-    
+
     $NETSTANDARD_TARGET = "netstandard2.0"
     $NET461_TARGET = "net461"
     

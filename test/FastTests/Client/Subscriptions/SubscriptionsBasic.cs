@@ -106,13 +106,13 @@ namespace FastTests.Client.Subscriptions
                         TimeToWaitBeforeConnectionRetry = TimeSpan.FromSeconds(5)
                     }))
                     {
-                        Assert.True(await Assert.ThrowsAsync<SubscriptionInUseException>(() => secondSubscription.Run(x => { })).WaitAsync(_reasonableWaitTime));
+                        Assert.True(await Assert.ThrowsAsync<SubscriptionInUseException>(() => secondSubscription.Run(x => { })).WaitWithoutExceptionAsync(_reasonableWaitTime));
                     }
                 }
             }
         }
 
-        [Fact]
+        [MultiplatformFact(RavenPlatform.Windows | RavenPlatform.Linux)]
         public void ShouldBeAbleToChangeBufferSizes()
         {
             using (var store = GetDocumentStore())
@@ -176,7 +176,7 @@ namespace FastTests.Client.Subscriptions
             }
         }
 
-        [Fact]
+        [MultiplatformFact(RavenPlatform.Windows | RavenPlatform.Linux)]
         public void ShouldStreamAllDocumentsAfterSubscriptionCreation()
         {
             using (var store = GetDocumentStore())
@@ -599,7 +599,7 @@ namespace FastTests.Client.Subscriptions
                 Assert.True(await Assert.ThrowsAsync<SubscriptionInUseException>(() =>
                 {
                     return subscriptionTask;
-                }).WaitAsync(_reasonableWaitTime));
+                }).WaitWithoutExceptionAsync(_reasonableWaitTime));
 
                 store.Subscriptions.DropConnection(id);
 
@@ -665,7 +665,7 @@ namespace FastTests.Client.Subscriptions
             }
         }
 
-        [Fact]
+        [Fact(Skip = "RavenDB-15919, need to change the test, since we update the ChangeVectorForNextBatchStartingPoint upon fetching and not acking")]
         public async Task ShouldStopPullingDocsAndCloseSubscriptionOnSubscriberErrorByDefault()
         {
             using (var store = GetDocumentStore())
@@ -956,8 +956,8 @@ namespace FastTests.Client.Subscriptions
 
                 var argumentError = Assert.Throws<SubscriptionDoesNotExistException>(() => store.Subscriptions.Update(new SubscriptionUpdateOptions { Name = name }));
                 Assert.StartsWith($"Raven.Client.Exceptions.Documents.Subscriptions.SubscriptionDoesNotExistException: Subscription with name '{name}' was not found in server store", argumentError.Message);
-                
-                argumentError = Assert.Throws<SubscriptionDoesNotExistException>(() => store.Subscriptions.Update(new SubscriptionUpdateOptions { Name = name, Id = id }) );
+
+                argumentError = Assert.Throws<SubscriptionDoesNotExistException>(() => store.Subscriptions.Update(new SubscriptionUpdateOptions { Name = name, Id = id }));
                 Assert.StartsWith(idMsg, argumentError.Message);
 
                 var subsId = store.Subscriptions.Create(new SubscriptionCreationOptions
@@ -1034,7 +1034,7 @@ namespace FastTests.Client.Subscriptions
 
                 newSubscriptions = await store.Subscriptions.GetSubscriptionsAsync(0, 5);
                 Assert.Equal(2, newSubscriptions.Count);
-                newState = newSubscriptions.FirstOrDefault(x=>x.SubscriptionName == id.ToString());
+                newState = newSubscriptions.FirstOrDefault(x => x.SubscriptionName == id.ToString());
                 Assert.NotNull(newState);
                 Assert.Equal(query, newState.Query);
                 Assert.Equal(id, newState.SubscriptionId);
@@ -1175,7 +1175,7 @@ namespace FastTests.Client.Subscriptions
                 }
             }
         }
-        
+
         private class ProjectionObject
         {
             public string SomeProp { get; set; }

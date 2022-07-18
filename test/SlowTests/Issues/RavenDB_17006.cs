@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Net.WebSockets;
+﻿using System.Collections.Generic;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
 using FastTests.Server.Replication;
@@ -28,7 +25,7 @@ namespace SlowTests.Issues
 
             RavenServer leader = result.Leader;
 
-            X509Certificate2 clientCertificate = RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
+            X509Certificate2 clientCertificate = Certificates.RegisterClientCertificate(result.Certificates.ServerCertificate.Value, result.Certificates.ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin, server: leader);
 
             var localNode = result.Nodes[0];
             var remoteNode = result.Nodes[1];

@@ -3,12 +3,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FastTests.Server.Replication;
 using Raven.Client.Documents;
 using Raven.Client.Documents.Conventions;
-using Raven.Client.Documents.Operations;
 using Raven.Client.Documents.Operations.CompareExchange;
 using Raven.Client.Documents.Operations.Replication;
 using Raven.Client.Documents.Session;
@@ -18,9 +18,9 @@ using Raven.Client.Http;
 using Raven.Client.ServerWide;
 using Raven.Client.ServerWide.Commands.Cluster;
 using Raven.Client.ServerWide.Operations;
-using Raven.Server;
 using Raven.Server.Config;
 using Raven.Server.Documents.Replication;
+using Raven.Server.Documents.Subscriptions;
 using Raven.Server.Rachis;
 using Raven.Server.ServerWide.Commands;
 using Raven.Server.ServerWide.Context;
@@ -338,7 +338,7 @@ namespace RachisTests
                 Urls = new[] { leader.WebUrl },
                 Database = db
             }.Initialize())
-            using (EnsureDatabaseDeletion(db, store))
+            using (Databases.EnsureDatabaseDeletion(db, store))
             {
                 var hasDisconnected = await WaitForValueAsync(() => leader.ServerStore.GetNodesStatuses().Count(n => n.Value.Connected == false), 1) == 1;
                 Assert.True(hasDisconnected);
@@ -403,7 +403,7 @@ namespace RachisTests
                     tasks.Add(ravenServer.ServerStore.Cluster.WaitForIndexNotification(watcherRes.RaftCommandIndex));
                 }
 
-                Assert.True(await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(5)));
+                Assert.True(await Task.WhenAll(tasks).WaitWithoutExceptionAsync(TimeSpan.FromSeconds(5)));
 
                 var responsibleServer = Servers.Single(s => s.ServerStore.NodeTag == watcherRes.ResponsibleNode);
                 using (var responsibleStore = new DocumentStore
@@ -428,7 +428,7 @@ namespace RachisTests
 
                     // remove the node from the cluster that is responsible for the external replication
                     await ActionWithLeader((l) => l.ServerStore.RemoveFromClusterAsync(watcherRes.ResponsibleNode).WaitAsync(fromSeconds));
-                    Assert.True(await responsibleServer.ServerStore.WaitForState(RachisState.Passive, CancellationToken.None).WaitAsync(fromSeconds));
+                    Assert.True(await responsibleServer.ServerStore.WaitForState(RachisState.Passive, CancellationToken.None).WaitWithoutExceptionAsync(fromSeconds));
 
                     var dbInstance = await responsibleServer.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(dbMain);
                     await WaitForValueAsync(() => dbInstance.ReplicationLoader.OutgoingConnections.Count(), 0);
@@ -471,7 +471,7 @@ namespace RachisTests
 
                 // rejoin the node
                 var newLeader = await ActionWithLeader(l => l.ServerStore.AddNodeToClusterAsync(responsibleServer.WebUrl, watcherRes.ResponsibleNode));
-                Assert.True(await responsibleServer.ServerStore.WaitForState(RachisState.Follower, CancellationToken.None).WaitAsync(fromSeconds));
+                Assert.True(await responsibleServer.ServerStore.WaitForState(RachisState.Follower, CancellationToken.None).WaitWithoutExceptionAsync(fromSeconds));
 
                 using (var newLeaderStore = new DocumentStore
                 {
@@ -519,7 +519,7 @@ namespace RachisTests
                     Name = db
                 });
 
-                await WaitForAssertion(() =>
+                await WaitForAssertionAsync(() =>
                 {
                     using (cluster.Leader.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
                     using (ctx.OpenReadTransaction())
@@ -533,6 +533,8 @@ namespace RachisTests
                         Assert.Equal(0, topology.Promotables.Count);
                         Assert.Equal(0, topology.Rehabs.Count);
                     }
+
+                    return Task.CompletedTask;
                 });
             }
         }
@@ -564,17 +566,30 @@ namespace RachisTests
                     Name = db
                 });
 
-                await WaitForAssertion(() =>
+                await WaitForAssertionAsync(async () =>
                 {
                     using (cluster.Leader.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
                     using (ctx.OpenReadTransaction())
                     {
                         var record = cluster.Leader.ServerStore.Cluster.ReadDatabase(ctx, db);
-                        Assert.Equal(0, record.DeletionInProgress?.Count ?? 0);
-
+                        var deletionInProgress = record.DeletionInProgress?.Count ?? 0;
+                        var info = "";
                         var topology = record.Topology;
+
+                        if (deletionInProgress > 0 || topology.Members.Count < 2)
+                        {
+                            var status = deletionInProgress > 0 ? record.DeletionInProgress.First().Value.ToString() : "";
+                            info += $"deletionInProgress = {deletionInProgress}, status = {status}. " +
+                                    $"members = {topology.Members.Count}, rehabs = {topology.Rehabs.Count}, ReplicationFactor = {topology.ReplicationFactor}";
+                            var sb = new StringBuilder();
+                            await GetClusterDebugLogsAsync(sb);
+                            info += sb.ToString();
+                        }
+
+                        Assert.True(0 == deletionInProgress, info);
+                        Assert.True(2 == topology.Members.Count, info);
+
                         Assert.Equal(2, topology.ReplicationFactor);
-                        Assert.Equal(2, topology.Members.Count);
                         Assert.Equal(0, topology.Promotables.Count);
                         Assert.Equal(0, topology.Rehabs.Count);
                     }
@@ -610,7 +625,7 @@ namespace RachisTests
                     Name = db
                 });
 
-                await WaitForAssertion(() =>
+                await WaitForAssertionAsync(() =>
                 {
                     using (cluster.Leader.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
                     using (ctx.OpenReadTransaction())
@@ -624,6 +639,8 @@ namespace RachisTests
                         Assert.Equal(0, topology.Promotables.Count);
                         Assert.Equal(0, topology.Rehabs.Count);
                     }
+
+                    return Task.CompletedTask;
                 });
             }
         }
@@ -675,7 +692,7 @@ namespace RachisTests
                 FromNodes = new[] { firstFollowerTag },
             });
 
-            await WaitForRaftIndexToBeAppliedInCluster(result.Index, TimeSpan.FromSeconds(10));
+            await Cluster.WaitForRaftIndexToBeAppliedInClusterAsync(result.Index, TimeSpan.FromSeconds(10));
 
             Assert.Throws<InvalidOperationException>(() =>
             {
@@ -755,6 +772,83 @@ namespace RachisTests
         }
 
         [Fact]
+        public async Task CanSnapshotSubscriptionState()
+        {
+            var (_, leader) = await CreateRaftCluster(1, watcherCluster: true);
+
+            using (var store = GetDocumentStore(options: new Options
+            {
+                Server = leader
+            }))
+            {
+                var sub = await store.Subscriptions.CreateAsync<User>();
+
+                var worker = store.Subscriptions.GetSubscriptionWorker<User>(sub);
+
+                var waitForBatch = new ManualResetEvent(false);
+                var t = worker.Run((batch) => { waitForBatch.WaitOne(TimeSpan.FromSeconds(15)); });
+              
+                using (var session = store.OpenAsyncSession())
+                {
+                    await session.StoreAsync(new User());
+                    await session.SaveChangesAsync();
+                }
+
+                var database = await leader.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(store.Database);
+                database.SubscriptionStorage.GetSubscriptionFromServerStore(sub);
+
+
+                var server2 = GetNewServer();
+                var server2Url = server2.ServerStore.GetNodeHttpServerUrl();
+                Servers.Add(server2);
+
+                using (var requestExecutor = ClusterRequestExecutor.CreateForSingleNode(leader.WebUrl, null))
+                using (requestExecutor.ContextPool.AllocateOperationContext(out var ctx))
+                {
+                    await requestExecutor.ExecuteAsync(new AddClusterNodeCommand(server2Url, watcher: true), ctx);
+
+                    var addDatabaseNode = new AddDatabaseNodeOperation(store.Database);
+                    await store.Maintenance.Server.SendAsync(addDatabaseNode);
+                    await WaitAndAssertForValueAsync(() => GetMembersCount(store), 2);
+                }
+
+                database = await server2.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(store.Database);
+                var state = database.SubscriptionStorage.GetSubscriptionFromServerStore(sub);
+
+                using (server2.ServerStore.Engine.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
+                using (context.OpenReadTransaction())
+                {
+                    Assert.Single(SubscriptionStorage.GetResendItems(context, store.Database, state.SubscriptionId));
+                }
+
+                waitForBatch.Set();
+            }
+        }
+
+        [Fact]
+        public async Task AddNodeToClusterWithoutError()
+        {
+            var (_, leader) = await CreateRaftCluster(1);
+
+            var server2 = GetNewServer();
+            var server2Url = server2.ServerStore.GetNodeHttpServerUrl();
+            Servers.Add(server2);
+
+            using (var requestExecutor = ClusterRequestExecutor.CreateForSingleNode(leader.WebUrl, null))
+            using (requestExecutor.ContextPool.AllocateOperationContext(out var ctx))
+            {
+                await requestExecutor.ExecuteAsync(new AddClusterNodeCommand(server2Url, watcher: true), ctx);
+                await server2.ServerStore.Engine.WaitForTopology(Leader.TopologyModification.NonVoter);
+            }
+
+            using (server2.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
+            {
+                var logs = ctx.ReadObject(server2.ServerStore.Engine.InMemoryDebug.ToJson(),"watcher-logs").ToString();
+                Assert.False(logs.Contains("Exception"), logs);
+            }
+        }
+
+        [Fact]
         public async Task ResetServerShouldPreserveTopology()
         {
             var cluster = await CreateRaftCluster(3, shouldRunInMemory: false);
@@ -785,14 +879,14 @@ namespace RachisTests
             Assert.Equal(3, topology.AllNodes.Count);
         }
 
-        private async Task WaitForAssertion(Action action)
+        private async Task WaitForAssertionAsync(Func<Task> action)
         {
             var sp = Stopwatch.StartNew();
             while (true)
             {
                 try
                 {
-                    action();
+                    await action();
                     return;
                 }
                 catch

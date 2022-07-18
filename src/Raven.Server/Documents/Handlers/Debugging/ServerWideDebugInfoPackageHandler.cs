@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
+using Raven.Client.Exceptions;
 using Raven.Client.Http;
 using Raven.Client.ServerWide;
 using Raven.Client.ServerWide.Commands;
@@ -14,6 +16,7 @@ using Raven.Server.Routing;
 using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Web;
+using Sparrow.Exceptions;
 using Sparrow.Json;
 using Sparrow.Json.Parsing;
 using Sparrow.Logging;
@@ -23,10 +26,39 @@ namespace Raven.Server.Documents.Handlers.Debugging
 {
     public class ServerWideDebugInfoPackageHandler : RequestHandler
     {
-        private static readonly string[] EmptyStringArray = new string[0];
-        private const string _serverWidePrefix = "server-wide";
+        internal const string _serverWidePrefix = "server-wide";
 
-        //this endpoint is intended to be called by /debug/cluster-info-package only
+        internal static readonly string[] FieldsThatShouldBeExposedForDebug = new string[]
+        {
+            nameof(DatabaseRecord.DatabaseName),
+            nameof(DatabaseRecord.Encrypted),
+            nameof(DatabaseRecord.Disabled),
+            nameof(DatabaseRecord.EtagForBackup),
+            nameof(DatabaseRecord.DeletionInProgress),
+            nameof(DatabaseRecord.DatabaseState),
+            nameof(DatabaseRecord.Topology),
+            nameof(DatabaseRecord.ConflictSolverConfig),
+            nameof(DatabaseRecord.Sorters),
+            nameof(DatabaseRecord.Indexes),
+            nameof(DatabaseRecord.IndexesHistory),
+            nameof(DatabaseRecord.AutoIndexes),
+            nameof(DatabaseRecord.Revisions),
+            nameof(DatabaseRecord.RevisionsForConflicts),
+            nameof(DatabaseRecord.Expiration),
+            nameof(DatabaseRecord.Refresh),
+            nameof(DatabaseRecord.Client),
+            nameof(DatabaseRecord.Studio),
+            nameof(DatabaseRecord.TruncatedClusterTransactionCommandsCount),
+            nameof(DatabaseRecord.UnusedDatabaseIds),
+            nameof(DatabaseRecord.RollingIndexes),
+            nameof(DatabaseRecord.LockMode),
+            nameof(DatabaseRecord.DocumentsCompression),
+            nameof(DatabaseRecord.Analyzers),
+            nameof(DatabaseRecord.TimeSeries)
+        };
+
+        private Logger _logger = LoggingSource.Instance.GetLogger<ServerWideDebugInfoPackageHandler>("Server");
+
         [RavenAction("/admin/debug/remote-cluster-info-package", "GET", AuthorizationStatus.Operator)]
         public async Task GetClusterWideInfoPackageForRemote()
         {
@@ -46,10 +78,11 @@ namespace Raven.Server.Documents.Handlers.Debugging
                             requestHeader = JsonDeserializationServer.NodeDebugInfoRequestHeader(requestHeaderJson);
                         }
 
-                        await WriteServerWide(archive, jsonOperationContext, localEndpointClient, _serverWidePrefix);
+                        await WriteServerInfo(archive, jsonOperationContext, localEndpointClient);
                         foreach (var databaseName in requestHeader.DatabaseNames)
                         {
-                            await WriteForDatabase(archive, jsonOperationContext, localEndpointClient, databaseName);
+                            await WriteDatabaseRecord(archive, databaseName, jsonOperationContext, transactionOperationContext);
+                            await WriteDatabaseInfo(archive, jsonOperationContext, localEndpointClient, databaseName);
                         }
                     }
 
@@ -71,99 +104,33 @@ namespace Raven.Server.Documents.Handlers.Debugging
 
             await ServerStore.Operations.AddOperation(null, "Created debug package for all cluster nodes", Operations.Operations.OperationType.DebugPackage, async _ =>
             {
-            using (ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext transactionOperationContext))
-            using (ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext jsonOperationContext))
-            using (transactionOperationContext.OpenReadTransaction())
-            {
-                await using (var ms = new MemoryStream())
+                using (ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext transactionOperationContext))
+                using (ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext jsonOperationContext))
+                using (transactionOperationContext.OpenReadTransaction())
                 {
-                    using (var archive = new ZipArchive(ms, ZipArchiveMode.Create, true))
+                    await using (var ms = new MemoryStream())
                     {
-                        var localEndpointClient = new LocalEndpointClient(Server);
-
-                        await using (var localMemoryStream = new MemoryStream())
+                        using (var archive = new ZipArchive(ms, ZipArchiveMode.Create, true))
                         {
-                            //assuming that if the name tag is empty
-                            var nodeName = $"Node - [{ServerStore.NodeTag ?? "Empty node tag"}]";
+                            var topology = ServerStore.GetClusterTopology(transactionOperationContext);
 
-                            using (var localArchive = new ZipArchive(localMemoryStream, ZipArchiveMode.Create, true))
+                            foreach (var (tag, url) in topology.AllNodes)
                             {
-                                    await WriteServerWide(localArchive, jsonOperationContext, localEndpointClient, _serverWidePrefix, token.Token);
-                                    await WriteForAllLocalDatabases(localArchive, jsonOperationContext, localEndpointClient, token: token.Token);
-                                    await WriteLogFile(localArchive, token.Token);
-                            }
-
-                            localMemoryStream.Position = 0;
-                            var entry = archive.CreateEntry($"{nodeName}.zip");
-                            entry.ExternalAttributes = ((int)(FilePermissions.S_IRUSR | FilePermissions.S_IWUSR)) << 16;
-
-                            await using (var entryStream = entry.Open())
-                            {
-                                await localMemoryStream.CopyToAsync(entryStream);
-                                await entryStream.FlushAsync();
-                            }
-                        }
-
-                        var databaseNames = ServerStore.Cluster.GetDatabaseNames(transactionOperationContext);
-                        var topology = ServerStore.GetClusterTopology(transactionOperationContext);
-
-                        //this means no databases are defined in the cluster
-                        //in this case just output server-wide endpoints from all cluster nodes
-                        if (databaseNames.Count == 0)
-                        {
-                            foreach (var tagWithUrl in topology.AllNodes)
-                            {
-                                if (tagWithUrl.Value.Contains(ServerStore.GetNodeHttpServerUrl()))
-                                    continue;
-
                                 try
                                 {
-                                    await WriteDebugInfoPackageForNodeAsync(
-                                        jsonOperationContext,
-                                        archive,
-                                        tag: tagWithUrl.Key,
-                                        url: tagWithUrl.Value,
-                                        certificate: Server.Certificate.Certificate,
-                                        databaseNames: null);
+                                    await WriteDebugInfoPackageForNodeAsync(jsonOperationContext, archive, tag, url, Server.Certificate.Certificate);
                                 }
                                 catch (Exception e)
                                 {
-                                    var entryName = $"Node - [{tagWithUrl.Key}]";
-                                    await DebugInfoPackageUtils.WriteExceptionAsZipEntryAsync(e, archive, entryName);
+                                    await DebugInfoPackageUtils.WriteExceptionAsZipEntryAsync(e, archive, $"Node - [{tag}]");
                                 }
                             }
                         }
-                        else
-                        {
-                            var nodeUrlToDatabaseNames = CreateUrlToDatabaseNamesMapping(transactionOperationContext, databaseNames);
-                            foreach (var urlToDatabaseNamesMap in nodeUrlToDatabaseNames)
-                            {
-                                if (urlToDatabaseNamesMap.Key.Contains(ServerStore.GetNodeHttpServerUrl()))
-                                    continue; //skip writing local data, we do it separately
 
-                                try
-                                {
-                                    await WriteDebugInfoPackageForNodeAsync(
-                                        jsonOperationContext,
-                                        archive,
-                                        tag: urlToDatabaseNamesMap.Value.Item2,
-                                        url: urlToDatabaseNamesMap.Key,
-                                        databaseNames: urlToDatabaseNamesMap.Value.Item1,
-                                        certificate: Server.Certificate.Certificate);
-                                }
-                                catch (Exception e)
-                                {
-                                    var entryName = $"Node - [{urlToDatabaseNamesMap.Value.Item2}]";
-                                    await DebugInfoPackageUtils.WriteExceptionAsZipEntryAsync(e, archive, entryName);
-                                }
-                            }
-                        }
-                    }
-
-                    ms.Position = 0;
+                        ms.Position = 0;
                         await ms.CopyToAsync(ResponseBodyStream(), token.Token);
+                    }
                 }
-            }
 
                 return null;
             }, operationId, token: token);
@@ -174,7 +141,6 @@ namespace Raven.Server.Documents.Handlers.Debugging
             ZipArchive archive,
             string tag,
             string url,
-            IEnumerable<string> databaseNames,
             X509Certificate2 certificate)
         {
             //note : theoretically GetDebugInfoFromNodeAsync() can throw, error handling is done at the level of WriteDebugInfoPackageForNodeAsync() calls
@@ -188,8 +154,7 @@ namespace Raven.Server.Documents.Handlers.Debugging
 
                 await using (var responseStream = await GetDebugInfoFromNodeAsync(
                     context,
-                    requestExecutor,
-                    databaseNames ?? EmptyStringArray))
+                    requestExecutor))
                 {
                     var entry = archive.CreateEntry($"Node - [{tag}].zip");
                     entry.ExternalAttributes = ((int)(FilePermissions.S_IRUSR | FilePermissions.S_IWUSR)) << 16;
@@ -212,19 +177,19 @@ namespace Raven.Server.Documents.Handlers.Debugging
 
 
             var token = CreateOperationToken();
-            
+
             var operationId = GetLongQueryString("operationId", false) ?? ServerStore.Operations.GetNextOperationId();
 
             await ServerStore.Operations.AddOperation(null, "Created debug package for current server only", Operations.Operations.OperationType.DebugPackage, async _ =>
             {
-            using (ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext context))
+                using (ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext context))
                 await using (var ms = new MemoryStream())
                 {
                     using (var archive = new ZipArchive(ms, ZipArchiveMode.Create, true))
                     {
                         var localEndpointClient = new LocalEndpointClient(Server);
-        
-                        await WriteServerWide(archive, context, localEndpointClient, _serverWidePrefix, token.Token);
+
+                        await WriteServerInfo(archive, context, localEndpointClient, token.Token);
                         await WriteForAllLocalDatabases(archive, context, localEndpointClient, token: token.Token);
                         await WriteLogFile(archive, token.Token);
                     }
@@ -240,7 +205,7 @@ namespace Raven.Server.Documents.Handlers.Debugging
         private static async Task WriteLogFile(ZipArchive archive, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
-            
+
             var prefix = $"{_serverWidePrefix}/{DateTime.UtcNow:yyyy-MM-dd H:mm:ss}.txt";
 
             try
@@ -271,91 +236,40 @@ namespace Raven.Server.Documents.Handlers.Debugging
 
         private async Task<Stream> GetDebugInfoFromNodeAsync(
             JsonOperationContext context,
-            RequestExecutor requestExecutor,
-            IEnumerable<string> databaseNames)
+            RequestExecutor requestExecutor)
         {
-            var bodyJson = new DynamicJsonValue
-            {
-                [nameof(NodeDebugInfoRequestHeader.FromUrl)] = ServerStore.GetNodeHttpServerUrl(),
-                [nameof(NodeDebugInfoRequestHeader.DatabaseNames)] = databaseNames
-            };
-
-            await using (var ms = new MemoryStream())
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, ms))
-            {
-                context.Write(writer, bodyJson);
-                await writer.FlushAsync();
-                await ms.FlushAsync();
-
-                var rawStreamCommand = new GetRawStreamResultCommand($"admin/debug/remote-cluster-info-package", ms);
-
-                await requestExecutor.ExecuteAsync(rawStreamCommand, context);
-                rawStreamCommand.Result.Position = 0;
-                return rawStreamCommand.Result;
-            }
+            var rawStreamCommand = new GetRawStreamResultCommand($"/admin/debug/info-package");
+            await requestExecutor.ExecuteAsync(rawStreamCommand, context);
+            rawStreamCommand.Result.Position = 0;
+            return rawStreamCommand.Result;
         }
 
-        private async Task WriteServerWide(ZipArchive archive, JsonOperationContext context, LocalEndpointClient localEndpointClient, string prefix,
-            CancellationToken token = default)
+        private async Task WriteForAllLocalDatabases(ZipArchive archive, JsonOperationContext jsonOperationContext, LocalEndpointClient localEndpointClient, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
-            
-            //theoretically this could be parallelized,
-            //however ZipArchive allows only one archive entry to be open concurrently
-            foreach (var route in DebugInfoPackageUtils.Routes.Where(x => x.TypeOfRoute == RouteInformation.RouteType.None))
-            {
-                token.ThrowIfCancellationRequested();
-                
-                var entryRoute = DebugInfoPackageUtils.GetOutputPathFromRouteInformation(route, prefix);
-                try
-                {
-                    var entry = archive.CreateEntry(entryRoute);
-                    entry.ExternalAttributes = ((int)(FilePermissions.S_IRUSR | FilePermissions.S_IWUSR)) << 16;
 
-                    await using (var entryStream = entry.Open())
-                    await using (var writer = new AsyncBlittableJsonTextWriter(context, entryStream))
-                    using (var endpointOutput = await localEndpointClient.InvokeAndReadObjectAsync(route, context))
-                    {
-                        context.Write(writer, endpointOutput);
-                        await writer.FlushAsync();
-                        await entryStream.FlushAsync(token);
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception e)
-                {
-                    await DebugInfoPackageUtils.WriteExceptionAsZipEntryAsync(e, archive, entryRoute);
-                }
-            }
-        }
-
-        private async Task WriteForAllLocalDatabases(ZipArchive archive, JsonOperationContext jsonOperationContext, LocalEndpointClient localEndpointClient, 
-            string prefix = null, CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested();
-            
             using (ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext context))
             using (context.OpenReadTransaction())
             {
                 foreach (var databaseName in ServerStore.Cluster.GetDatabaseNames(context))
                 {
                     token.ThrowIfCancellationRequested();
-                    
+
                     using (var rawRecord = ServerStore.Cluster.ReadRawDatabaseRecord(context, databaseName))
                     {
                         if (rawRecord == null ||
-                            rawRecord.Topology.RelevantFor(ServerStore.NodeTag) == false ||
-                            rawRecord.IsDisabled ||
+                            rawRecord.Topology.RelevantFor(ServerStore.NodeTag) == false)
+                            continue;
+
+                        await WriteDatabaseRecord(archive, databaseName, jsonOperationContext, context, token);
+
+                        if (rawRecord.IsDisabled ||
                             rawRecord.DatabaseState == DatabaseStateStatus.RestoreInProgress ||
                             IsDatabaseBeingDeleted(ServerStore.NodeTag, rawRecord))
                             continue;
-                    }
 
-                    var path = !string.IsNullOrWhiteSpace(prefix) ? Path.Combine(prefix, databaseName) : databaseName;
-                    await WriteForDatabase(archive, jsonOperationContext, localEndpointClient, databaseName, path, token);
+                        await WriteDatabaseInfo(archive, jsonOperationContext, localEndpointClient, databaseName, token);
+                    }
                 }
             }
         }
@@ -370,68 +284,151 @@ namespace Raven.Server.Documents.Handlers.Debugging
             return deletionInProgress != null && deletionInProgress.TryGetValue(tag, out var delInProgress) && delInProgress != DeletionInProgressStatus.No;
         }
 
-        private static async Task WriteForDatabase(ZipArchive archive, JsonOperationContext context, LocalEndpointClient localEndpointClient, string databaseName, string path = null, CancellationToken token = default)
+        private async Task WriteDatabaseInfo(ZipArchive archive, JsonOperationContext jsonOperationContext, LocalEndpointClient localEndpointClient,
+            string databaseName, CancellationToken token = default)
         {
-            token.ThrowIfCancellationRequested();
-            
-            var endpointParameters = new Dictionary<string, Microsoft.Extensions.Primitives.StringValues>
+            var endpointParameters = new Dictionary<string, Microsoft.Extensions.Primitives.StringValues>()
             {
-                {"database", new Microsoft.Extensions.Primitives.StringValues(databaseName)}
+                { "database", new Microsoft.Extensions.Primitives.StringValues(databaseName) }
             };
+            await WriteForServerOrDatabase(archive, jsonOperationContext, localEndpointClient, RouteInformation.RouteType.Databases, databaseName, databaseName, endpointParameters, token);
+        }
 
-            foreach (var route in DebugInfoPackageUtils.Routes.Where(x => x.TypeOfRoute == RouteInformation.RouteType.Databases))
+        private async Task WriteServerInfo(ZipArchive archive, JsonOperationContext jsonOperationContext, LocalEndpointClient localEndpointClient, CancellationToken token = default)
+        {
+            await WriteForServerOrDatabase(archive, jsonOperationContext, localEndpointClient, RouteInformation.RouteType.None, _serverWidePrefix, null, null, token);
+        }
+
+        private async Task WriteForServerOrDatabase(ZipArchive archive, JsonOperationContext context, LocalEndpointClient localEndpointClient,
+            RouteInformation.RouteType routeType, string path, string databaseName,
+            Dictionary<string, Microsoft.Extensions.Primitives.StringValues> endpointParameters = null,
+            CancellationToken token = default)
+        {
+            var debugInfoDict = new Dictionary<string, TimeSpan>();
+            token.ThrowIfCancellationRequested();
+
+            var routes = DebugInfoPackageUtils.GetAuthorizedRoutes(Server, HttpContext, databaseName).Where(x => x.TypeOfRoute == routeType);
+
+            var id = Guid.NewGuid();
+            if (_logger.IsOperationsEnabled)
+                _logger.Operations($"Creating Debug Package '{id}' for '{databaseName ?? "Server"}'.");
+
+
+            foreach (var route in routes)
             {
-                token.ThrowIfCancellationRequested();
+                Exception ex = null;
+                var sw = Stopwatch.StartNew();
+
+                if (_logger.IsOperationsEnabled)
+                    _logger.Operations($"Started gathering debug info from '{route.Path}' for Debug Package '{id}'.");
 
                 try
                 {
-                    var entry = archive.CreateEntry(DebugInfoPackageUtils.GetOutputPathFromRouteInformation(route, path ?? databaseName));
-                    entry.ExternalAttributes = ((int)(FilePermissions.S_IRUSR | FilePermissions.S_IWUSR)) << 16;
-
-                    await using (var entryStream = entry.Open())
-                    await using (var writer = new AsyncBlittableJsonTextWriter(context, entryStream))
+                    using (var operationToken = new CancellationTokenSource(TimeSpan.FromMinutes(5)))
+                    using (var mergedToken = CancellationTokenSource.CreateLinkedTokenSource(operationToken.Token, token))
                     {
-                        using (var endpointOutput = await localEndpointClient.InvokeAndReadObjectAsync(route, context, endpointParameters))
-                        {
-                            context.Write(writer, endpointOutput);
-                            await writer.FlushAsync();
-                            await entryStream.FlushAsync(token);
-                        }
+                        await InvokeAndWriteToArchive(archive, context, localEndpointClient, route, path, endpointParameters, mergedToken.Token);
+                        debugInfoDict[route.Path] = sw.Elapsed;
                     }
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
                 }
                 catch (Exception e)
                 {
-                    await DebugInfoPackageUtils.WriteExceptionAsZipEntryAsync(e, archive, path ?? databaseName);
+                    ex = e;
+                }
+                finally
+                {
+                    if (_logger.IsOperationsEnabled)
+                        _logger.Operations($"Finished gathering debug info from '{route.Path}' for Debug Package '{id}'. Took: {(int)sw.Elapsed.TotalMilliseconds} ms", ex);
                 }
             }
+
+            await DebugInfoPackageUtils.WriteDebugInfoTimesAsZipEntryAsync(debugInfoDict, archive, databaseName);
         }
 
-        private Dictionary<string, (HashSet<string>, string)> CreateUrlToDatabaseNamesMapping(TransactionOperationContext transactionOperationContext, IEnumerable<string> databaseNames)
+        internal static async Task InvokeAndWriteToArchive(ZipArchive archive, JsonOperationContext jsonOperationContext, LocalEndpointClient localEndpointClient,
+            RouteInformation route, string path,
+            Dictionary<string, Microsoft.Extensions.Primitives.StringValues> endpointParameters = null,
+            CancellationToken token = default)
         {
-            var nodeUrlToDatabaseNames = new Dictionary<string, (HashSet<string>, string)>();
-            var clusterTopology = ServerStore.GetClusterTopology(transactionOperationContext);
-            foreach (var databaseName in databaseNames)
+            try
             {
-                var topology = ServerStore.Cluster.ReadDatabaseTopology(transactionOperationContext, databaseName);
-                var nodeUrlsAndTags = topology.AllNodes.Select(tag => (clusterTopology.GetUrlFromTag(tag), tag));
-                foreach (var urlAndTag in nodeUrlsAndTags)
+                var response = await localEndpointClient.InvokeAsync(route, endpointParameters);
+
+                var entryName = DebugInfoPackageUtils.GetOutputPathFromRouteInformation(route, path, response.ContentType == "text/plain" ? "txt" : "json");
+                var entry = archive.CreateEntry(entryName);
+                entry.ExternalAttributes = ((int)(FilePermissions.S_IRUSR | FilePermissions.S_IWUSR)) << 16;
+
+                using (var entryStream = entry.Open())
                 {
-                    if (nodeUrlToDatabaseNames.TryGetValue(urlAndTag.Item1, out (HashSet<string>, string) databaseNamesWithNodeTag))
+                    if (response.ContentType == "text/plain")
                     {
-                        databaseNamesWithNodeTag.Item1.Add(databaseName);
+                        await response.Body.CopyToAsync(entryStream, token);
                     }
                     else
                     {
-                        nodeUrlToDatabaseNames.Add(urlAndTag.Item1, (new HashSet<string> { databaseName }, urlAndTag.Item2));
+                        await using (var writer = new AsyncBlittableJsonTextWriter(jsonOperationContext, entryStream))
+                        {
+                            var endpointOutput = await jsonOperationContext.ReadForMemoryAsync(response.Body, $"read/local endpoint/{route.Path}");
+                            jsonOperationContext.Write(writer, endpointOutput);
+                            await writer.FlushAsync();
+                        }
                     }
+                    await entryStream.FlushAsync(token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception e)
+            {
+                //precaution, ideally this exception should never be thrown
+                if (e is InvalidStartOfObjectException)
+                    e = new InvalidOperationException("Expected to find a blittable object as a result of debug endpoint, but found something else (see inner exception for details). This should be investigated as all RavenDB endpoints are supposed to return an object.", e);
+
+                await DebugInfoPackageUtils.WriteExceptionAsZipEntryAsync(e, archive, DebugInfoPackageUtils.GetOutputPathFromRouteInformation(route, path, null));
+            }
+        }
+
+        private async Task WriteDatabaseRecord(ZipArchive archive, string databaseName, JsonOperationContext jsonOperationContext, TransactionOperationContext transactionCtx, CancellationToken token = default)
+        {
+            var entryName = DebugInfoPackageUtils.GetOutputPathFromRouteInformation("/database-record", databaseName, "json");
+            try
+            {
+                var entry = archive.CreateEntry(entryName);
+                entry.ExternalAttributes = ((int)(FilePermissions.S_IRUSR | FilePermissions.S_IWUSR)) << 16;
+
+                await using (var entryStream = entry.Open())
+                await using (var writer = new AsyncBlittableJsonTextWriter(jsonOperationContext, entryStream))
+                {
+                    jsonOperationContext.Write(writer, GetDatabaseRecordForDebugPackage(transactionCtx, databaseName));
+                    await writer.FlushAsync();
+                    await entryStream.FlushAsync(token);
+                }
+            }
+            catch (Exception e)
+            {
+                await DebugInfoPackageUtils.WriteExceptionAsZipEntryAsync(e, archive, entryName);
+            }
+        }
+
+        public BlittableJsonReaderObject GetDatabaseRecordForDebugPackage(TransactionOperationContext context, string databaseName)
+        {
+            var databaseRecord = Server.ServerStore.Cluster.ReadRawDatabaseRecord(context, databaseName);
+
+            if (databaseRecord == null)
+                throw new RavenException($"Couldn't fetch {nameof(DatabaseRecord)} from server for database '{databaseName}'");
+
+            var djv = new DynamicJsonValue();
+            foreach (string fld in FieldsThatShouldBeExposedForDebug)
+            {
+                if (databaseRecord.Raw.TryGetMember(fld, out var obj))
+                {
+                    djv[fld] = obj;
                 }
             }
 
-            return nodeUrlToDatabaseNames;
+            return context.ReadObject(djv, "databaserecord");
         }
 
         internal class NodeDebugInfoRequestHeader

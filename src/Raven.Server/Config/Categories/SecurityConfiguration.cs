@@ -17,6 +17,11 @@ namespace Raven.Server.Config.Categories
         [DefaultValue(false)]
         [ConfigurationEntry("Security.DisableHttpsRedirection", ConfigurationEntryScope.ServerWideOnly)]
         public bool DisableHttpsRedirection { get; set; }
+        
+        [Description("Disable HTTP Strict Transport Security")]
+        [DefaultValue(false)]
+        [ConfigurationEntry("Security.DisableHsts", ConfigurationEntryScope.ServerWideOnly)]
+        public bool DisableHsts { get; set; }
 
         [Description("The path to a folder where RavenDB will store the access audit logs")]
         [DefaultValue(null)]
@@ -26,8 +31,8 @@ namespace Raven.Server.Config.Categories
         [Description("How far back we should retain audit log entries")]
         [DefaultValue(365 * 24)]
         [TimeUnit(TimeUnit.Hours)]
-        [ConfigurationEntry("Security.AuditLog.RetentionTimeInHrs", ConfigurationEntryScope.ServerWideOnly)]
         [ConfigurationEntry("Security.AuditLog.RetentionTimeInHours", ConfigurationEntryScope.ServerWideOnly)]
+        [ConfigurationEntry("Security.AuditLog.RetentionTimeInHrs", ConfigurationEntryScope.ServerWideOnly)]
         public TimeSetting AuditLogRetentionTime { get; set; }
 
         [Description("The maximum size of the audit log after which the old files will be deleted")]

@@ -206,7 +206,6 @@
         }
     }
 
-
     .property-container {
         margin: @gutter-xxs;
         margin-top: 0;
@@ -584,7 +583,7 @@
             position: relative;
             flex-grow: 1;
 
-            .create-database {
+            .no-data-area {
                 text-align: center;
                 display: block;
                 .absolute-center;
@@ -597,7 +596,7 @@
     .tasks-container {
         background-color: @well-bg;
         margin: 0 @gutter-xxs @gutter-xxs;
-        max-height: 300px;
+        max-height: 400px;
         overflow: auto;
 
         .task-item {
@@ -622,7 +621,6 @@
                 padding-bottom: @gutter-sm;
             }
 
-
             .task-name {
                 width: 200px;
                 flex-shrink: 0;
@@ -630,6 +628,10 @@
 
             .task-count {
                 flex-grow: 1;
+                
+                &.no-count {
+                    font-size: 80%;
+                }
             }
 
             &.external-replication .task-name i {
@@ -648,8 +650,16 @@
                 color: @ravendb-etl-color;
             }
 
+            &.olap-etl .task-name i {
+                color: @olap-etl-color;
+            }
+
             &.sql-etl .task-name i {
                 color: @sql-etl-color;
+            }
+
+            &.elastic-etl .task-name i {
+                color: @elastic-etl-color;
             }
 
             &.periodic-backup .task-name i {

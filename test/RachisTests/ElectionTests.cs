@@ -1,14 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Raven.Client.Exceptions.Cluster;
+using FastTests;
 using Raven.Client.ServerWide;
 using Raven.Server.Rachis;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
+using Sparrow.Threading;
 using Tests.Infrastructure;
 using Xunit;
 using Xunit.Abstractions;
@@ -30,7 +30,7 @@ namespace RachisTests
                         nodeCurrentState == RachisState.Leader);
             var waitForState = node.WaitForState(RachisState.Leader, CancellationToken.None);
 
-            var condition = await waitForState.WaitAsync(10 * node.ElectionTimeout);
+            var condition = await waitForState.WaitWithoutExceptionAsync(10 * node.ElectionTimeout);
             Assert.True(condition, $"Node is in state {node.CurrentState} and didn't become leader although he is alone in his cluster.");
         }
 
@@ -73,9 +73,125 @@ namespace RachisTests
 
             var t1 = leader.WaitForCommitIndexChange(RachisConsensus.CommitIndexModification.GreaterOrEqual, lastIndex);
             var t2 = follower.WaitForCommitIndexChange(RachisConsensus.CommitIndexModification.GreaterOrEqual, lastIndex);
-            if (await Task.WhenAll(t1, t2).WaitAsync(5000) == false)
+            if (await Task.WhenAll(t1, t2).WaitWithoutExceptionAsync(5000) == false)
             {
                 throw new TimeoutException();
+            }
+        }
+
+        [Fact]
+        public async Task CanElectOnDivergence3()
+        {
+            var firstLeader = await CreateNetworkAndGetLeader(3);
+            var followers = GetFollowers();
+
+            var randFollower = followers.First();
+            DisconnectBiDirectionalFromNode(randFollower);
+
+            var leaderTerm = firstLeader.CurrentTerm;
+            await IssueCommandsAndWaitForCommit(10, "foo", 123);
+
+            ReconnectBiDirectionalFromNode(randFollower);
+            DisconnectBiDirectionalFromNode(firstLeader);
+
+            for (int i = 0; i < 10; i++)
+            {
+                firstLeader.AppendToLog(new TestCommand { Name = "bar", Value = 1 }, leaderTerm);
+            }
+
+            await firstLeader.WaitForState(RachisState.Candidate, CancellationToken.None);
+
+            var newLeader = WaitForAnyToBecomeLeader(followers);
+
+            var lastIndex = -1L;
+
+            using (firstLeader.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
+            using (context.OpenReadTransaction())
+            {
+                lastIndex = firstLeader.GetLastCommitIndex(context);
+            }
+
+            await IssueCommandsAndWaitForCommit(10, "baz", 123);
+            var nonLeader = followers.Single(x => x != newLeader);
+            DisconnectBiDirectionalFromNode(nonLeader);
+
+            using (newLeader.ContextPool.AllocateOperationContext(out ClusterOperationContext ctx))
+            using (var tx = ctx.OpenWriteTransaction())
+            {
+                newLeader.TruncateLogBefore(ctx, lastIndex);
+                tx.Commit();
+            }
+
+            ReconnectBiDirectionalFromNode(firstLeader);
+
+            using (newLeader.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
+            using (context.OpenReadTransaction())
+            {
+                lastIndex = newLeader.GetLastCommitIndex(context);
+            }
+
+            var condition = await firstLeader.WaitForCommitIndexChange(RachisConsensus.CommitIndexModification.GreaterOrEqual, lastIndex)
+                    .WaitWithoutExceptionAsync(5000);
+
+            using (firstLeader.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
+            using (context.OpenReadTransaction())
+            {
+                var commitIndex = firstLeader.GetLastCommitIndex(context);
+                Assert.True(condition, $"Last commit is {commitIndex} wanted {lastIndex}");
+            }
+
+            ReconnectBiDirectionalFromNode(nonLeader);
+
+            lastIndex = await IssueCommandsAndWaitForCommit(10, "foo", 357);
+
+            foreach (var r in RachisConsensuses)
+            {
+                condition = await r.WaitForCommitIndexChange(RachisConsensus.CommitIndexModification.GreaterOrEqual, lastIndex)
+                        .WaitWithoutExceptionAsync(5000);
+
+                using (r.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
+                using (context.OpenReadTransaction())
+                {
+                    var commitIndex = r.GetLastCommitIndex(context);
+                    Assert.True(condition, $"Last commit is {commitIndex} wanted {lastIndex}");
+                }
+            }
+        }
+
+        [Fact]
+        public async Task CanElectOnDivergence2()
+        {
+            var firstLeader = await CreateNetworkAndGetLeader(3);
+            var flag = new MultipleUseFlag();
+            foreach (var follower in RachisConsensuses)
+            {
+                follower.ForTestingPurposesOnly().CreateLeaderLock(flag);
+                follower.ForTestingPurposes.Mre = null;
+            }
+
+            firstLeader.CurrentLeader.StepDown(forceElection: false);
+            await Task.Delay(1000);
+                
+            WaitForAnyToBecomeLeader(RachisConsensuses);
+            var lastIndex = await IssueCommandsAndWaitForCommit(30, "test", 1);
+                
+            foreach (var node in RachisConsensuses)
+            {
+                node.ForTestingPurposes?.LeaderLock?.Awake();
+            }
+
+            foreach (var r in RachisConsensuses)
+            {
+                var condition = await
+                    r.WaitForCommitIndexChange(RachisConsensus.CommitIndexModification.GreaterOrEqual, lastIndex)
+                        .WaitWithoutExceptionAsync(10000);
+
+                using (r.ContextPool.AllocateOperationContext(out ClusterOperationContext context))
+                using (context.OpenReadTransaction())
+                {
+                    var commitIndex = r.GetLastCommitIndex(context);
+                    Assert.True(condition, $"Last commit is {commitIndex} wanted {lastIndex}");
+                }
             }
         }
 
@@ -105,7 +221,7 @@ namespace RachisTests
                 firstLeader.InsertToLeaderLog(ctx, currentTerm, ctx.ReadObject(cmd.ToJson(ctx), "bar"), RachisEntryFlags.StateMachineCommand);
                 tx.Commit();
             }
-            Assert.True(await firstLeader.WaitForLeaveState(RachisState.Leader, CancellationToken.None).WaitAsync(timeToWait));
+            Assert.True(await firstLeader.WaitForLeaveState(RachisState.Leader, CancellationToken.None).WaitWithoutExceptionAsync(timeToWait));
 
             List<Task> waitingList = new List<Task>();
             while (true)
@@ -120,7 +236,7 @@ namespace RachisTests
                     {
                         Log.Info("Started waiting for new leader");
                     }
-                    var done = await Task.WhenAny(waitingList).WaitAsync(timeToWait);
+                    var done = await Task.WhenAny(waitingList).WaitWithoutExceptionAsync(timeToWait);
                     if (done)
                     {
                         break;
@@ -144,7 +260,7 @@ namespace RachisTests
             do
             {
                 var waitForCommitIndexChange = firstLeader.WaitForCommitIndexChange(RachisConsensus.CommitIndexModification.GreaterOrEqual, newLeaderLastIndex);
-                if (await waitForCommitIndexChange.WaitAsync(timeToWait))
+                if (await waitForCommitIndexChange.WaitWithoutExceptionAsync(timeToWait))
                 {
                     break;
                 }
@@ -163,7 +279,7 @@ namespace RachisTests
         {
             var firstLeader = await CreateNetworkAndGetLeader(numberOfNodes);
             firstLeader.CurrentLeader.StepDown();
-            Assert.True(await firstLeader.WaitForState(RachisState.Follower, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30)), "Old leader hasn't stepped down.");
+            Assert.True(await firstLeader.WaitForState(RachisState.Follower, CancellationToken.None).WaitWithoutExceptionAsync(TimeSpan.FromSeconds(30)), "Old leader hasn't stepped down.");
         }
 
         /// <summary>
@@ -200,22 +316,24 @@ namespace RachisTests
                     {
                         Log.Info("Started waiting for new leader");
                     }
-                    var done = await Task.WhenAny(waitingList).WaitAsync(timeToWait);
+                    var done = await Task.WhenAny(waitingList).WaitWithoutExceptionAsync(timeToWait);
                     if (done)
                     {
                         break;
                     }
 
                     var maxTerm = followers.Max(f => f.CurrentTerm);
-                    Assert.True(currentTerm + 1 <= maxTerm, $"Followers didn't become leaders although old leader can't communicate with the cluster in term {currentTerm} (max term: {maxTerm})" +
-                                                            $"{string.Join(',',followers.Select(f=>$"{f.Tag}={f.CurrentState}:{f.CurrentTerm}"))}");
+                    RavenTestHelper.AssertTrue(currentTerm + 1 <= maxTerm, () =>
+                        $"Followers didn't become leaders although old leader can't communicate with the cluster in term {currentTerm} (max term: {maxTerm})" +
+                        $"{string.Join(',', followers.Select(f => $"{f.Tag}={f.CurrentState}:{f.CurrentTerm}"))}");
+
                     Assert.True(maxTerm < 10, "Followers were unable to elect a leader.");
                     currentTerm = maxTerm;
                     waitingList.Clear();
                 }
             }
 
-            Assert.True(await firstLeader.WaitForLeaveState(RachisState.Leader,CancellationToken.None).WaitAsync(timeToWait));
+            Assert.True(await firstLeader.WaitForLeaveState(RachisState.Leader,CancellationToken.None).WaitWithoutExceptionAsync(timeToWait));
 
             var newLeaderLastIndex = await IssueCommandsAndWaitForCommit(5, "test", 1);
             if (Log.IsInfoEnabled)
@@ -228,7 +346,7 @@ namespace RachisTests
             do
             {
                 var waitForCommitIndexChange = firstLeader.WaitForCommitIndexChange(RachisConsensus.CommitIndexModification.GreaterOrEqual, newLeaderLastIndex);
-                if (await waitForCommitIndexChange.WaitAsync(timeToWait))
+                if (await waitForCommitIndexChange.WaitWithoutExceptionAsync(timeToWait))
                 {
                     break;
                 }
@@ -255,24 +373,25 @@ namespace RachisTests
             var firstLeader = await CreateNetworkAndGetLeader(numberOfNodes);
             var follower = GetFollowers().Single();
 
-            var timeToWait = TimeSpan.FromMilliseconds(1000 * numberOfNodes);
+            var timeToWait = TimeSpan.FromMilliseconds(5000 * numberOfNodes);
             await IssueCommandsAndWaitForCommit(10, "test", 1);
             var currentTerm = firstLeader.CurrentTerm;
-
-            var t = Task.Run(() => IssueCommandsWithoutWaitingForCommits(firstLeader, 100, "test"));
+            
             Disconnect(follower.Url, firstLeader.Url);
-            await t;
 
-            Assert.True(await firstLeader.WaitForState(RachisState.Candidate, CancellationToken.None).WaitAsync(timeToWait),$"{firstLeader.CurrentState}");
+            // append to previous leader
+            firstLeader.AppendToLog(new TestCommand { Name = "foo", Value = 123 }, currentTerm);
+
+            Assert.True(await firstLeader.WaitForState(RachisState.Candidate, CancellationToken.None).WaitWithoutExceptionAsync(timeToWait),$"{firstLeader.CurrentState}");
             follower.FoundAboutHigherTerm(currentTerm + 1," why not, should work!");
             Reconnect(follower.Url, firstLeader.Url);
 
-
-            Assert.True(await firstLeader.WaitForState(RachisState.Leader, CancellationToken.None).WaitAsync(timeToWait),
+            RavenTestHelper.AssertTrue(await firstLeader.WaitForState(RachisState.Leader, CancellationToken.None).WaitWithoutExceptionAsync(timeToWait), () =>
                 $"leader: {firstLeader.CurrentState} in term {firstLeader.CurrentTerm} with last index {GetLastCommittedIndex(firstLeader)}{Environment.NewLine}, " +
-                $"follower: state {follower.CurrentState} in term {follower.CurrentTerm} with last index {GetLastCommittedIndex(follower)}");
-            Assert.True(currentTerm + 2 <= firstLeader.CurrentTerm,$"{currentTerm} + 2 <= {firstLeader.CurrentTerm}");
+                $"follower: state {follower.CurrentState} in term {follower.CurrentTerm} with last index {GetLastCommittedIndex(follower)}{Environment.NewLine}" +
+                $"{GetCandidateStatus(RachisConsensuses)}");
 
+            Assert.True(currentTerm + 2 <= firstLeader.CurrentTerm,$"{currentTerm} + 2 <= {firstLeader.CurrentTerm}");
 
             var count = 100;
             while (true)
@@ -299,8 +418,11 @@ namespace RachisTests
                 var leaderValue = firstLeader.StateMachine.Read(leaderContext, "test");
                 var followerValue = follower.StateMachine.Read(followerContext, "test");
                 Assert.Equal(leaderValue, followerValue);
+                Assert.Equal(new string('1', 10), followerValue);
             }
         }
+
+
 
         private long GetLastCommittedIndex(RachisConsensus<CountingStateMachine> rachis)
         {

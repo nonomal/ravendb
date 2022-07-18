@@ -5,6 +5,7 @@ import generalUtils = require("common/generalUtils");
 import getCertificatesCommand = require("commands/auth/getCertificatesCommand");
 import accessManager = require("common/shell/accessManager");
 import clusterDashboard = require("viewmodels/resources/clusterDashboard");
+import moment = require("moment");
 
 interface serverCertificateInfo {
     dateFormatted: string;
@@ -14,8 +15,10 @@ interface serverCertificateInfo {
 
 class licenseWidget extends widget {
 
+    view = require("views/resources/widgets/licenseWidget.html");
+
     refreshIntervalId: number = -1;
-    usingHttps = location.protocol === "https:";
+    isSecureServer = accessManager.default.secureServer();
     
     spinners = {
         serverCertificate: ko.observable<boolean>()
@@ -35,7 +38,7 @@ class licenseWidget extends widget {
     }
 
     private canLoadCertificateInfo() {
-        return this.usingHttps && accessManager.default.isOperatorOrAbove();
+        return this.isSecureServer && accessManager.default.isOperatorOrAbove();
     }
 
     compositionComplete() {

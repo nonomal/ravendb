@@ -23,12 +23,12 @@ namespace SlowTests.Issues
         {
             var path = NewDataPath();
 
-            using (var store = GetDocumentStore(new Options { Path = path, ModifyDatabaseRecord = record => record.Settings[RavenConfiguration.GetKey(x => x.Indexing.ErrorIndexStartupBehavior)] = IndexingConfiguration.IndexStartupBehavior.Start.ToString() }))
+            using (var store = GetDocumentStore(new Options { Path = path, ModifyDatabaseRecord = record => record.Settings[RavenConfiguration.GetKey(x => x.Indexing.ErrorIndexStartupBehavior)] = IndexingConfiguration.ErrorIndexStartupBehaviorType.Start.ToString() }))
             {
                 await IndexStartupBehaviorTestInternal(store);
             }
 
-            using (var store = GetDocumentStore(new Options { Path = path, ModifyDatabaseRecord = record => record.Settings[RavenConfiguration.GetKey(x => x.Indexing.ErrorIndexStartupBehavior)] = IndexingConfiguration.IndexStartupBehavior.ResetAndStart.ToString() }))
+            using (var store = GetDocumentStore(new Options { Path = path, ModifyDatabaseRecord = record => record.Settings[RavenConfiguration.GetKey(x => x.Indexing.ErrorIndexStartupBehavior)] = IndexingConfiguration.ErrorIndexStartupBehaviorType.ResetAndStart.ToString() }))
             {
                 await IndexStartupBehaviorTestInternal(store);
             }
@@ -57,9 +57,9 @@ namespace SlowTests.Issues
                 autoIndexName = stats.IndexName;
             }
 
-            WaitForIndexing(store);
+            Indexes.WaitForIndexing(store);
 
-            var database = await GetDocumentDatabaseInstanceFor(store);
+            var database = await Databases.GetDocumentDatabaseInstanceFor(store);
 
             var indexInstance = database.IndexStore.GetIndex(index.IndexName);
             indexInstance.SetState(IndexState.Error);

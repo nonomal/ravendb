@@ -221,6 +221,21 @@ namespace Raven.Server.Monitoring.Snmp
             [Description("Remaining server storage disk space in %")]
             public const string StorageDiskRemainingSpacePercentage = "1.10.4";
 
+            [Description("IO read operations per second")]
+            public const string StorageDiskIoReadOperations = "1.10.5";
+            
+            [Description("IO write operations per second")]
+            public const string StorageDiskIoWriteOperations = "1.10.6";
+
+            [Description("Read throughput in kilobytes pe second")]
+            public const string StorageDiskReadThroughput = "1.10.7";
+            
+            [Description("Write throughput in kilobytes pe second")]
+            public const string StorageDiskWriteThroughput = "1.10.8";
+            
+            [Description("Queue length")]
+            public const string StorageDiskQueueLength = "1.10.9";
+            
             [Description("Server certificate expiration date")]
             public const string ServerCertificateExpiration = "1.11.1";
 
@@ -250,6 +265,9 @@ namespace Raven.Server.Monitoring.Snmp
 
             [Description("Number of active TCP connections")]
             public const string TcpActiveConnections = "1.15.1";
+
+            [Description("Indicates if any experimental features are used")]
+            public const string FeatureAnyExperimental = "1.16.1";
 
             public static DynamicJsonArray ToJson()
             {
@@ -403,6 +421,21 @@ namespace Raven.Server.Monitoring.Snmp
 
             [Description("Remaining storage disk space in MB")]
             public const string StorageDiskRemainingSpace = "5.2.{0}.2.6";
+            
+            [Description("IO read operations per second")]
+            public const string StorageDiskIoReadOperations = "5.2.{0}.2.7";
+            
+            [Description("IO write operations per second")]
+            public const string StorageDiskIoWriteOperations = "5.2.{0}.2.8";
+            
+            [Description("Read throughput in kilobytes per second")]
+            public const string StorageDiskReadThroughput = "5.2.{0}.2.9";
+            
+            [Description("Write throughput in kilobytes per second")]
+            public const string StorageDiskWriteThroughput = "5.2.{0}.2.10";
+            
+            [Description("Queue length")]
+            public const string StorageDiskQueueLength = "5.2.{0}.2.11";
 
             [Description("Number of document puts per second (one minute rate)")]
             public const string DocPutsPerSecond = "5.2.{0}.3.1";
@@ -442,6 +475,9 @@ namespace Raven.Server.Monitoring.Snmp
 
             [Description("Number of error indexes")]
             public const string NumberOfErrorIndexes = "5.2.{0}.5.6";
+
+            [Description("Number of faulty indexes")]
+            public const string NumberOfFaultyIndexes = "5.2.{0}.5.7";
 
             [Description("Number of writes (documents, attachments, counters)")]
             public const string WritesPerSecond = "5.2.{0}.6.1";
@@ -562,6 +598,9 @@ namespace Raven.Server.Monitoring.Snmp
                 [Description("Number of error indexes in all loaded databases")]
                 public const string TotalNumberOfErrorIndexes = "5.1.7.3";
 
+                [Description("Number of faulty indexes in all loaded databases")]
+                public const string TotalNumberOfFaultyIndexes = "5.1.7.4";
+
                 [Description("Number of indexed documents per second for map indexes (one minute rate) in all loaded databases")]
                 public const string TotalMapIndexIndexesPerSecond = "5.1.8.1";
 
@@ -576,6 +615,9 @@ namespace Raven.Server.Monitoring.Snmp
 
                 [Description("Number of bytes written (documents, attachments, counters) in all loaded databases")]
                 public const string TotalDataWrittenPerSecond = "5.1.9.2";
+
+                [Description("Number of faulted databases")]
+                public const string FaultedCount = "5.1.10";
 
                 public static DynamicJsonArray ToJson()
                 {

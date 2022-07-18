@@ -25,7 +25,7 @@ namespace SlowTests.Server
         {
             using (GetDocumentStore())
             {
-                var certificate = new X509Certificate2(GenerateAndSaveSelfSignedCertificate().ServerCertificatePath, (string)null, X509KeyStorageFlags.MachineKeySet);
+                var certificate = new X509Certificate2(Certificates.GenerateAndSaveSelfSignedCertificate().ServerCertificatePath, (string)null, X509KeyStorageFlags.MachineKeySet);
 
                 TransactionOperationContext context;
                 using (Server.ServerStore.ContextPool.AllocateOperationContext(out context))
@@ -38,7 +38,8 @@ namespace SlowTests.Server
                         SecurityClearance = SecurityClearance.ClusterAdmin,
                         Thumbprint = certificate.Thumbprint,
                         PublicKeyPinningHash = certificate.GetPublicKeyPinningHash(),
-                        NotAfter = certificate.NotAfter
+                        NotAfter = certificate.NotAfter,
+                        NotBefore = certificate.NotBefore
                     },string.Empty));
                 }
 
@@ -59,7 +60,7 @@ namespace SlowTests.Server
         {
             using (GetDocumentStore())
             {
-                var certificate = new X509Certificate2(GenerateAndSaveSelfSignedCertificate().ServerCertificatePath, (string)null, X509KeyStorageFlags.MachineKeySet);
+                var certificate = new X509Certificate2(Certificates.GenerateAndSaveSelfSignedCertificate().ServerCertificatePath, (string)null, X509KeyStorageFlags.MachineKeySet);
 
                 TransactionOperationContext context;
                 using (Server.ServerStore.ContextPool.AllocateOperationContext(out context))
@@ -74,7 +75,8 @@ namespace SlowTests.Server
                             SecurityClearance = SecurityClearance.ClusterAdmin,
                             Thumbprint = certificate.Thumbprint,
                             PublicKeyPinningHash = certificate.GetPublicKeyPinningHash(),
-                            NotAfter = certificate.NotAfter
+                            NotAfter = certificate.NotAfter,
+                            NotBefore = certificate.NotBefore
                         }, string.Empty));
                     }
                 }
@@ -90,7 +92,8 @@ namespace SlowTests.Server
                             SecurityClearance = SecurityClearance.ClusterAdmin,
                             Thumbprint = certificate.Thumbprint,
                             PublicKeyPinningHash = certificate.GetPublicKeyPinningHash(),
-                            NotAfter = certificate.NotAfter
+                            NotAfter = certificate.NotAfter,
+                            NotBefore = certificate.NotBefore
                         }, string.Empty));
                     }
                 }

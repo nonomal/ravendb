@@ -1,5 +1,3 @@
-#nullable enable
-
 using System;
 using System.Buffers;
 using System.IO;
@@ -41,7 +39,7 @@ namespace Sparrow.Utils
                 alreadyOnBuffer.Valid = alreadyOnBuffer.Used = 0; // consume all the data from the buffer
             }
 
-            _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+            _inner = innerInput ?? throw new ArgumentNullException(nameof(inner));
             _input = ZstdStream.Decompress(inner);
             _output = ZstdStream.Compress(inner);
             _dispose = new DisposeOnce<SingleAttempt>(DisposeInternal);
@@ -102,12 +100,12 @@ namespace Sparrow.Utils
             throw new NotSupportedException();
         }
 
-        public override IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state)
+        public override IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback callback, object state)
         {
             return _input.BeginRead(buffer, offset, count, callback, state);
         }
 
-        public override IAsyncResult BeginWrite(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state)
+        public override IAsyncResult BeginWrite(byte[] buffer, int offset, int count, AsyncCallback callback, object state)
         {
             return _output.BeginWrite(buffer, offset, count, callback, state);
         }

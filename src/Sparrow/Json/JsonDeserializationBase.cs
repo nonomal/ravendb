@@ -73,8 +73,11 @@ namespace Sparrow.Json
                 {
                     assign
                 };
-                foreach (var fieldInfo in typeof(T).GetFields())
+                foreach (var fieldInfo in typeof(T).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 {
+                    if ((fieldInfo.IsPublic == false) && (fieldInfo.IsDefined(typeof(ForceJsonSerializationAttribute)) == false))
+                        continue;
+
                     if (fieldInfo.IsStatic || fieldInfo.IsDefined(typeof(JsonDeserializationIgnoreAttribute)))
                         continue;
 
@@ -86,8 +89,12 @@ namespace Sparrow.Json
                     SetValue(fieldInfo.FieldType, access, fieldValue);
                 }
 
-                foreach (var propertyInfo in typeof(T).GetProperties())
+                foreach (var propertyInfo in typeof(T).GetProperties(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 {
+                    if ((propertyInfo.GetGetMethod(true)?.IsPublic == false) &&
+                        propertyInfo.IsDefined(typeof(ForceJsonSerializationAttribute)) == false)
+                        continue;
+
                     if (propertyInfo.CanWrite == false || propertyInfo.IsDefined(typeof(JsonDeserializationIgnoreAttribute)))
                         continue;
 
@@ -226,9 +233,19 @@ namespace Sparrow.Json
                         var methodToCall = typeof(JsonDeserializationBase).GetMethod(nameof(ToDictionaryOfDictionaryOfStringArray), BindingFlags.NonPublic | BindingFlags.Static);
                         return Expression.Call(methodToCall, json, Expression.Constant(propertyName), GetJsonDeserializationDictionaryAttribute(customAttributes));
                     }
+                    if (valueType == typeof(Dictionary<string, double[]>))
+                    {
+                        var methodToCall = typeof(JsonDeserializationBase).GetMethod(nameof(ToDictionaryOfDictionaryOfDoubleArray), BindingFlags.NonPublic | BindingFlags.Static);
+                        return Expression.Call(methodToCall, json, Expression.Constant(propertyName), GetJsonDeserializationDictionaryAttribute(customAttributes));
+                    }
                     if (valueType == typeof(string[]))
                     {
                         var methodToCall = typeof(JsonDeserializationBase).GetMethod(nameof(ToDictionaryOfStringArray), BindingFlags.NonPublic | BindingFlags.Static);
+                        return Expression.Call(methodToCall, json, Expression.Constant(propertyName), GetJsonDeserializationDictionaryAttribute(customAttributes));
+                    }
+                    if (valueType == typeof(double[]))
+                    {
+                        var methodToCall = typeof(JsonDeserializationBase).GetMethod(nameof(ToDictionaryOfDoubleArray), BindingFlags.NonPublic | BindingFlags.Static);
                         return Expression.Call(methodToCall, json, Expression.Constant(propertyName), GetJsonDeserializationDictionaryAttribute(customAttributes));
                     }
                     if (valueType == typeof(List<string>))
@@ -268,8 +285,12 @@ namespace Sparrow.Json
                     }
                 }
 
-                if (propertyType == typeof(List<string>) || propertyType == typeof(HashSet<string>))
+                var isReadOnlyListOfStrings = propertyType == typeof(IReadOnlyList<string>);
+                if (propertyType == typeof(List<string>) || propertyType == typeof(HashSet<string>) || isReadOnlyListOfStrings)
                 {
+                    if (isReadOnlyListOfStrings)
+                        propertyType = typeof(List<string>);
+
                     var method = typeof(JsonDeserializationBase).GetMethod(nameof(ToCollectionOfString), BindingFlags.NonPublic | BindingFlags.Static);
                     method = method.MakeGenericMethod(propertyType);
                     return Expression.Call(method, json, Expression.Constant(propertyName));
@@ -300,6 +321,11 @@ namespace Sparrow.Json
             if (propertyType == typeof(string[]))
             {
                 var method = typeof(JsonDeserializationBase).GetMethod(nameof(ToArrayOfString), BindingFlags.NonPublic | BindingFlags.Static);
+                return Expression.Call(method, json, Expression.Constant(propertyName));
+            }
+            if (propertyType == typeof(double[]))
+            {
+                var method = typeof(JsonDeserializationBase).GetMethod(nameof(ToArrayOfDouble), BindingFlags.NonPublic | BindingFlags.Static);
                 return Expression.Call(method, json, Expression.Constant(propertyName));
             }
             if (propertyType.IsArray)
@@ -593,6 +619,30 @@ namespace Sparrow.Json
             return dic;
         }
 
+        private static Dictionary<string, double[]> ToDictionaryOfDoubleArray(BlittableJsonReaderObject json, string name, JsonDeserializationStringDictionaryAttribute jsonDeserializationDictionaryAttribute)
+        {
+            var dic = new Dictionary<string, double[]>(GetStringComparer(jsonDeserializationDictionaryAttribute?.StringComparison ?? StringComparison.OrdinalIgnoreCase));
+
+            BlittableJsonReaderObject obj;
+            if (json.TryGet(name, out obj) == false || obj == null)
+                return dic;
+
+            foreach (var propertyName in obj.GetPropertyNames())
+            {
+                BlittableJsonReaderArray val;
+                if (obj.TryGet(propertyName, out val))
+                {
+                    var array = new double[val.Length];
+                    for (int i = 0; i < val.Length; i++)
+                    {
+                        array[i] = Convert.ToDouble(val[i]);
+                    }
+                    dic[propertyName] = array;
+                }
+            }
+            return dic;
+        }
+
         private static Dictionary<string, Dictionary<string, string[]>> ToDictionaryOfDictionaryOfStringArray(BlittableJsonReaderObject json, string name, JsonDeserializationStringDictionaryAttribute jsonDeserializationDictionaryAttribute)
         {
             var dic = new Dictionary<string, Dictionary<string, string[]>>(GetStringComparer(jsonDeserializationDictionaryAttribute?.StringComparison ?? StringComparison.OrdinalIgnoreCase));
@@ -627,6 +677,40 @@ namespace Sparrow.Json
             return dic;
         }
 
+        private static Dictionary<string, Dictionary<string, double[]>> ToDictionaryOfDictionaryOfDoubleArray(BlittableJsonReaderObject json, string name, JsonDeserializationStringDictionaryAttribute jsonDeserializationDictionaryAttribute)
+        {
+            var dic = new Dictionary<string, Dictionary<string, double[]>>(GetStringComparer(jsonDeserializationDictionaryAttribute?.StringComparison ?? StringComparison.OrdinalIgnoreCase));
+
+            BlittableJsonReaderObject obj;
+            //should a "null" exist in json? -> not sure that "null" can exist there
+            if (json.TryGet(name, out obj) == false || obj == null)
+                return dic;
+
+            foreach (var propertyName in obj.GetPropertyNames())
+            {
+                BlittableJsonReaderObject result;
+                if (obj.TryGet(propertyName, out result))
+                {
+                    var prop = new Dictionary<string, double[]>();
+                    dic[propertyName] = prop;
+                    foreach (var innerPropName in result.GetPropertyNames())
+                    {
+                        BlittableJsonReaderArray val;
+                        if (result.TryGet(innerPropName, out val))
+                        {
+                            var array = new double[val.Length];
+                            for (int i = 0; i < val.Length; i++)
+                            {
+                                array[i] = (double)val[i];
+                            }
+                            prop[innerPropName] = array;
+                        }
+                    }
+                }
+            }
+            return dic;
+        }
+
         private static TCollection ToCollectionOfString<TCollection>(BlittableJsonReaderObject json, string name)
             where TCollection : ICollection<string>, new()
         {
@@ -652,6 +736,20 @@ namespace Sparrow.Json
 
             foreach (var value in jsonArray)
                 collection.Add(value?.ToString());
+
+            return collection.ToArray();
+        }
+
+        private static double[] ToArrayOfDouble(BlittableJsonReaderObject json, string name)
+        {
+            var collection = new List<double>();
+
+            BlittableJsonReaderArray jsonArray;
+            if (json.TryGet(name, out jsonArray) == false || jsonArray == null)
+                return collection.ToArray();
+
+            foreach (var value in jsonArray)
+                collection.Add(Convert.ToDouble(value));
 
             return collection.ToArray();
         }
@@ -707,7 +805,7 @@ namespace Sparrow.Json
             if (json.TryGet(name, out BlittableJsonReaderArray array) == false || array == null)
                 return list;
 
-            foreach (BlittableJsonReaderObject item in array)
+            foreach (object item in array)
             {
                 if (item == null)
                 {
@@ -715,7 +813,20 @@ namespace Sparrow.Json
                     continue;
                 }
 
-                list.Add(converter(item));
+                if (item is BlittableJsonReaderObject bjro)
+                {
+                    list.Add(converter(bjro));
+                    continue;
+                }
+
+                object copy = item;
+
+                if (item is LazyStringValue lsv && IsNumeric<T>())
+                {
+                    copy = new LazyNumberValue(lsv);
+                }
+
+                list.Add((T)Convert.ChangeType(copy, typeof(T)));
             }
 
             return list;
@@ -743,7 +854,7 @@ namespace Sparrow.Json
 
                 object copy = item;
 
-                if (item is LazyStringValue lsv && IsNumeric())
+                if (item is LazyStringValue lsv && IsNumeric<T>())
                 {
                     copy = new LazyNumberValue(lsv);
                 }
@@ -752,21 +863,21 @@ namespace Sparrow.Json
             }
 
             return list.ToArray();
+        }
 
-            bool IsNumeric()
-            {
-                return typeof(T) == typeof(double) ||
-                    typeof(T) == typeof(decimal) ||
-                    typeof(T) == typeof(float) ||
-                    typeof(T) == typeof(int) ||
-                    typeof(T) == typeof(uint) ||
-                    typeof(T) == typeof(long) ||
-                    typeof(T) == typeof(ulong) ||
-                    typeof(T) == typeof(short) ||
-                    typeof(T) == typeof(ushort) ||
-                    typeof(T) == typeof(byte) ||
-                    typeof(T) == typeof(sbyte);
-            }
+        private static bool IsNumeric<T>()
+        {
+            return typeof(T) == typeof(double) ||
+                   typeof(T) == typeof(decimal) ||
+                   typeof(T) == typeof(float) ||
+                   typeof(T) == typeof(int) ||
+                   typeof(T) == typeof(uint) ||
+                   typeof(T) == typeof(long) ||
+                   typeof(T) == typeof(ulong) ||
+                   typeof(T) == typeof(short) ||
+                   typeof(T) == typeof(ushort) ||
+                   typeof(T) == typeof(byte) ||
+                   typeof(T) == typeof(sbyte);
         }
 
         private static bool TryGetTimeSpan(BlittableJsonReaderObject json, string propertyName, out TimeSpan timeSpan)

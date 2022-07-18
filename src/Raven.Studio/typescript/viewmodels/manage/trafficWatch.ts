@@ -9,8 +9,101 @@ import virtualGridController = require("widgets/virtualGrid/virtualGridControlle
 import generalUtils = require("common/generalUtils");
 import awesomeMultiselect = require("common/awesomeMultiselect");
 import getCertificatesCommand = require("commands/auth/getCertificatesCommand");
+import virtualColumn = require("widgets/virtualGrid/columns/virtualColumn");
+import recentQueriesStorage = require("common/storage/savedQueriesStorage");
+import queryCriteria = require("models/database/query/queryCriteria");
+import databasesManager = require("common/shell/databasesManager");
+import accessManager = require("common/shell/accessManager");
+import TrafficWatchHttpChange = Raven.Client.Documents.Changes.TrafficWatchHttpChange;
+import trafficWatchQueriesDialog from "viewmodels/manage/trafficWatchQueriesDialog";
+import app = require("durandal/app");
 
-type trafficChangeType = Raven.Client.Documents.Changes.TrafficWatchChangeType | Raven.Client.ServerWide.Tcp.TcpConnectionHeaderMessage.OperationTypes; 
+type trafficChangeType = Raven.Client.Documents.Changes.TrafficWatchChangeType | Raven.Client.ServerWide.Tcp.TcpConnectionHeaderMessage.OperationTypes;
+
+class runQueryFeature implements columnPreviewFeature {
+
+    private queryList: string[] = [];
+
+    install($tooltip: JQuery, valueProvider: () => any, elementProvider: () => any, containerSelector: string): void {
+        $tooltip.on("click", ".run-query", () => {
+            const value = valueProvider();
+            const item: Raven.Client.Documents.Changes.TrafficWatchChangeBase = elementProvider();
+
+            if (item.TrafficWatchType !== "Http" || (item as TrafficWatchHttpChange).Type !== "MultiGet") {
+                runQueryFeature.executeQuery(value, item);
+                return;
+            }
+
+            const queryList = this.queryList;
+            
+            if (queryList.length === 1) {
+                runQueryFeature.executeQuery(queryList[0], item);
+            } else {
+                app.showBootstrapDialog(new trafficWatchQueriesDialog(queryList))
+                    .done(queryToExecute => {
+                        if (queryToExecute) {
+                            runQueryFeature.executeQuery(queryToExecute, item);
+                        }
+                    });
+            }
+        });
+    }
+
+    private static getMultiGetQueriesList(value: any): string[] {
+        const queryList: string[] = [];
+
+        const lines = value.split(/\r?\n/);
+        
+        lines.forEach((line: string) => {
+            if (line) {
+                const jsonObj = JSON.parse(line);
+                
+                const queriesEndpoint = jsonObj.Url.endsWith("/queries");
+                const query = jsonObj.Query.slice("?query=".length);
+                                
+                if (queriesEndpoint && query) {
+                    queryList.push(query);
+                }
+            }
+        });
+
+        return queryList;
+    }
+
+    private static executeQuery(value: any, item: Raven.Client.Documents.Changes.TrafficWatchChangeBase): void {
+        const query = queryCriteria.empty();
+
+        query.queryText(value);
+        query.name("Traffic watch query");
+        query.recentQuery(true);
+
+        const queryDto = query.toStorageDto();
+
+        const db = databasesManager.default.getDatabaseByName(item.DatabaseName);
+
+        recentQueriesStorage.saveAndNavigate(db, queryDto, { newWindow: true });
+    }
+    
+    syntax(column: virtualColumn, escapedValue: any, element: any): string {
+        if (column.header !== "Custom Info" || escapedValue === generalUtils.escapeHtml("N/A")) {
+            return "";
+        }
+        
+        this.queryList = [];
+        let buttonText: string;
+
+        if (element.Type === "MultiGet") {
+            this.queryList = runQueryFeature.getMultiGetQueriesList(generalUtils.unescapeHtml(escapedValue));
+            buttonText = this.queryList.length > 1 ? "Run Query ..." : (this.queryList.length === 1 ? "Run Query" : "");
+        }        
+        
+        if (element.Type === "Queries" && (element.HttpMethod === "POST" || element.HttpMethod === "GET")) {
+            buttonText = "Run Query";
+        }
+        
+        return buttonText ? `<button class="btn btn-default btn-sm run-query"><i class="icon-query"></i><span>${buttonText}</span></button>` : "";
+    }
+}
 
 class typeData {
     count = ko.observable<number>(0);
@@ -32,7 +125,10 @@ type certificateInfo = {
 
 class trafficWatch extends viewModelBase {
     
+    view = require("views/manage/trafficWatch.html");
+    
     static readonly usingHttps = location.protocol === "https:";
+    static readonly isSecureServer = accessManager.default.secureServer();
     
     static maxBufferSize = 200000;
     
@@ -110,7 +206,7 @@ class trafficWatch extends viewModelBase {
         }
         this.updateHelpLink('EVEP6I');
 
-        if (trafficWatch.usingHttps) {
+        if (trafficWatch.isSecureServer) {
             return this.loadCertificates();
         }
     }
@@ -145,13 +241,6 @@ class trafficWatch extends viewModelBase {
         if (this.liveClient()) {
             this.liveClient().dispose();
         }
-    }
-    
-    attached() {
-        super.attached();
-        
-        awesomeMultiselect.build($("#visibleTypesSelectorHttp"), this.getOptions(this.filteredTypeDataHttp));
-        awesomeMultiselect.build($("#visibleTypesSelectorTcp"), this.getOptions(this.filteredTypeDataTcp));
     }
     
     private getOptions(filteredTypeData: typeData[]): (opts: any) => void {
@@ -249,7 +338,7 @@ class trafficWatch extends viewModelBase {
             } else {
                 this.updateDurationStats(filteredDataHttpNoWebSockets);
                 this.updatePercentiles(filteredDataHttpNoWebSockets);
-                }
+            }
         }
     }
                 
@@ -362,6 +451,9 @@ class trafficWatch extends viewModelBase {
     compositionComplete() {
         super.compositionComplete();
 
+        awesomeMultiselect.build($("#visibleTypesSelectorHttp"), this.getOptions(this.filteredTypeDataHttp));
+        awesomeMultiselect.build($("#visibleTypesSelectorTcp"), this.getOptions(this.filteredTypeDataTcp));
+
         $('.traffic-watch [data-toggle="tooltip"]').tooltip({
             html: true
         });
@@ -394,7 +486,7 @@ class trafficWatch extends viewModelBase {
                     sortable: "string"
                 }),
                 new textColumn<Raven.Client.Documents.Changes.TrafficWatchChangeBase>(grid,
-                    x => trafficWatch.usingHttps ? `<span class="icon-certificate text-info margin-right margin-right-xs"></span>${x.ClientIP}` : x.ClientIP,
+                    x => trafficWatch.isSecureServer ? `<span class="icon-certificate text-info margin-right margin-right-xs"></span>${x.ClientIP}` : x.ClientIP,
                     "Source", "8%", {
                     extraClass: rowHighlightRules,
                     useRawValue: () => true
@@ -452,6 +544,8 @@ class trafficWatch extends viewModelBase {
             ]
         );
 
+        const runQuery = new runQueryFeature();
+        
         this.columnPreview.install("virtual-grid", ".js-traffic-watch-tooltip",
             (item: Raven.Client.Documents.Changes.TrafficWatchChangeBase, column: textColumn<Raven.Client.Documents.Changes.TrafficWatchChangeBase>,
              e: JQueryEventObject, onValue: (value: any, valueToCopy?: string, wrapValue?: boolean) => void) => {
@@ -464,6 +558,8 @@ class trafficWatch extends viewModelBase {
                 } else if (column.header === "Source") {
                     onValue(this.formatSource(item, true), this.formatSource(item, false), false);
                 }
+            }, {
+                additionalFeatures: [runQuery]
             });
 
         $(".traffic-watch .viewport").on("scroll", () => {

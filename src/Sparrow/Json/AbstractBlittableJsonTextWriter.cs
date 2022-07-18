@@ -63,13 +63,13 @@ namespace Sparrow.Json
             EscapeCharacters[(byte)'"'] = (byte)'"';
         }
 
-        private readonly JsonOperationContext.MemoryBuffer _pinnedBuffer;
+        private protected readonly JsonOperationContext.MemoryBuffer _pinnedBuffer;
         private readonly byte* _buffer;
 
         private readonly byte* _auxiliarBuffer;
         private readonly int _auxiliarBufferLength;
 
-        private int _pos;
+        private protected int _pos;
         private readonly JsonOperationContext.MemoryBuffer.ReturnBuffer _returnBuffer;
         private readonly JsonOperationContext.MemoryBuffer.ReturnBuffer _returnAuxiliarBuffer;
 
@@ -145,6 +145,7 @@ namespace Sparrow.Json
 
         public void WriteValue(BlittableJsonToken token, object val)
         {
+            RuntimeHelpers.EnsureSufficientExecutionStack();
             switch (token)
             {
                 case BlittableJsonToken.String:
@@ -192,11 +193,13 @@ namespace Sparrow.Json
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void WriteDateTime(DateTime value, bool isUtc)
+        public int WriteDateTime(DateTime value, bool isUtc)
         {
             int size = value.GetDefaultRavenFormat(_auxiliarBuffer, _auxiliarBufferLength, isUtc);
 
             WriteRawStringWhichMustBeWithoutEscapeChars(_auxiliarBuffer, size);
+
+            return size;
         }
 
         public void WriteString(string str, bool skipEscaping = false)
@@ -696,6 +699,7 @@ namespace Sparrow.Json
             try
             {
                 FlushInternal();
+                _stream.Flush();
             }
             catch (ObjectDisposedException)
             {
@@ -719,20 +723,6 @@ namespace Sparrow.Json
             EnsureBuffer(2);
             _buffer[_pos++] = (byte)'\r';
             _buffer[_pos++] = (byte)'\n';
-        }
-
-        public void WriteStream(Stream stream)
-        {
-            FlushInternal();
-
-            while (true)
-            {
-                _pos = stream.Read(_pinnedBuffer.Memory.Memory.Span);
-                if (_pos == 0)
-                    break;
-
-                FlushInternal();
-            }
         }
 
         public void WriteMemoryChunk(IntPtr ptr, int size)

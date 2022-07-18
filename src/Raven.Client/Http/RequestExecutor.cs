@@ -235,7 +235,7 @@ namespace Raven.Client.Http
             return httpClientCache.GetOrAdd(name, new Lazy<HttpClient>(CreateClient)).Value;
         }
 
-        private void RemoveHttpClient()
+        internal void RemoveHttpClient()
         {
             var httpClientCache = GetHttpClientCache();
 
@@ -600,7 +600,7 @@ namespace Raven.Client.Http
                             if (_lastKnownUrls == null)
                             {
                                 // shouldn't happen
-                                throw new InvalidOperationException("No known topology and no previously known one, cannot proceed, likely a bug");
+                                throw new InvalidOperationException("No known topology and no previously known one, cannot proceed, likely a bug", topologyUpdate?.Exception);
                             }
 
                             _firstTopologyUpdate = FirstTopologyUpdate(_lastKnownUrls, null);
@@ -820,6 +820,8 @@ namespace Raven.Client.Http
             SessionInfo sessionInfo = null,
             CancellationToken token = default)
         {
+            token.ThrowIfCancellationRequested();
+
             if (command.FailoverTopologyEtag == InitialTopologyEtag)
                 command.FailoverTopologyEtag = _nodeSelector?.Topology?.Etag ?? InitialTopologyEtag;
 
@@ -913,7 +915,7 @@ namespace Raven.Client.Http
                 refreshTask = UpdateTopologyAsync(
                     new UpdateTopologyParameters(chosenNode)
                     {
-                        TimeoutInMs = 0, 
+                        TimeoutInMs = 0,
                         DebugTag = "refresh-topology-header"
                     });
             }
@@ -1054,7 +1056,7 @@ namespace Raven.Client.Http
             if (chosenNode.ShouldUpdateServerVersion())
             {
                 if (TryGetServerVersion(response, out var serverVersion))
-                    chosenNode.UpdateServerVersion(serverVersion);                    
+                    chosenNode.UpdateServerVersion(serverVersion);
             }
 
             LastServerVersion = chosenNode.LastServerVersion;
@@ -1082,7 +1084,7 @@ namespace Raven.Client.Http
         private void SetRequestHeaders(SessionInfo sessionInfo, string cachedChangeVector, HttpRequestMessage request)
         {
             if (cachedChangeVector != null)
-                request.Headers.TryAddWithoutValidation("If-None-Match", $"\"{cachedChangeVector}\"");
+                request.Headers.TryAddWithoutValidation(Constants.Headers.IfNoneMatch, $"\"{cachedChangeVector}\"");
 
             if (_disableClientConfigurationUpdates == false)
                 request.Headers.TryAddWithoutValidation(Constants.Headers.ClientConfigurationEtag, $"\"{ClientConfigurationEtag.ToInvariantString()}\"");
@@ -1369,7 +1371,7 @@ namespace Raven.Client.Http
                     {
                         builder.Append("a certificate is required. ");
                     }
-                    else if (Certificate.PrivateKey != null)
+                    else if (Certificate.HasPrivateKey)
                     {
                         builder.Append(Certificate.FriendlyName).Append(" does not have permission to access it or is unknown. ");
                     }
@@ -1440,7 +1442,7 @@ namespace Raven.Client.Http
                     var nextNode = ChooseNodeForRequest(command, sessionInfo);
 
                     await ExecuteAsync(nextNode.CurrentNode, nextNode.CurrentIndex, context, command, shouldRetry: true, sessionInfo: sessionInfo, token: token).ConfigureAwait(false);
-                    
+
                     if (nodeIndex.HasValue)
                         _nodeSelector.RestoreNodeIndex(nodeIndex.Value);
 
@@ -1487,10 +1489,13 @@ namespace Raven.Client.Http
         private async Task<bool> HandleServerDown<TResult>(string url, ServerNode chosenNode, int? nodeIndex, JsonOperationContext context, RavenCommand<TResult> command,
             HttpRequestMessage request, HttpResponseMessage response, Exception e, SessionInfo sessionInfo, bool shouldRetry, RequestContext requestContext = null, CancellationToken token = default)
         {
-            if (command.FailedNodes == null)
-                command.FailedNodes = new Dictionary<ServerNode, Exception>();
+            command.FailedNodes ??= new Dictionary<ServerNode, Exception>();
 
-            command.FailedNodes[chosenNode] = await ReadExceptionFromServer(context, request, response, e).ConfigureAwait(false);
+            var exception = await ReadExceptionFromServer(context, request, response, e).ConfigureAwait(false);
+            if (exception is RavenTimeoutException { FailImmediately: true })
+                throw exception;
+
+            command.FailedNodes[chosenNode] = exception;
 
             if (nodeIndex.HasValue == false)
             {
@@ -1801,7 +1806,7 @@ namespace Raven.Client.Http
                     ms.Position = 0;
                     using (var responseJson = await context.ReadForMemoryAsync(ms, "RequestExecutor/HandleServerDown/ReadResponseContent").ConfigureAwait(false))
                     {
-                        return ExceptionDispatcher.Get(JsonDeserializationClient.ExceptionSchema(responseJson), response.StatusCode, e);
+                        return ExceptionDispatcher.Get(responseJson, response.StatusCode, e);
                     }
                 }
                 catch
@@ -1945,7 +1950,9 @@ namespace Raven.Client.Http
 
                 try
                 {
+#pragma warning disable SYSLIB0014 // Type or member is obsolete
                     var servicePoint = ServicePointManager.FindServicePoint(new Uri(url));
+#pragma warning restore SYSLIB0014 // Type or member is obsolete
                     servicePoint.ConnectionLimit = DefaultConnectionLimit;
                     servicePoint.MaxIdleTime = -1;
                 }

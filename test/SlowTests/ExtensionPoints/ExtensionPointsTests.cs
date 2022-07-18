@@ -261,12 +261,12 @@ exit 129";
             IDictionary<string, string> customSettings = new ConcurrentDictionary<string, string>();
             var keyPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
             var buffer = new byte[256 / 8];
-            using (var cryptoRandom = new RNGCryptoServiceProvider())
+            using (var cryptoRandom = RandomNumberGenerator.Create())
             {
                 cryptoRandom.GetBytes(buffer);
             }
             File.WriteAllBytes(keyPath, buffer);
-            var certificates = GenerateAndSaveSelfSignedCertificate();
+            var certificates = Certificates.GenerateAndSaveSelfSignedCertificate();
             if (PlatformDetails.RunningOnPosix)
             {
                 var scriptPath = Path.Combine(Path.GetTempPath(), Path.ChangeExtension(Guid.NewGuid().ToString(), ".sh"));

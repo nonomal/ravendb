@@ -16,6 +16,8 @@ import popoverUtils = require("common/popoverUtils");
 
 class revisions extends viewModelBase {
 
+    view = require("views/database/settings/revisions.html");
+
     defaultDocumentConfiguration = ko.observable<revisionsConfigurationEntry>();
     defaultConflictConfiguration = ko.observable<revisionsConfigurationEntry>();
     
@@ -287,8 +289,11 @@ class revisions extends viewModelBase {
 
     editItem(entry: revisionsConfigurationEntry) {
         this.currentBackingItem(entry);
+        
         const clone = revisionsConfigurationEntry.empty().copyFrom(entry);
         this.currentlyEditedItem(clone);
+
+        this.currentlyEditedItem().validationGroup.errors.showAllMessages(false);
     }
 
     deleteItem(entry: revisionsConfigurationEntry) {

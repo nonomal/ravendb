@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,6 +28,7 @@ using Raven.Client.ServerWide.Commands;
 using Raven.Client.ServerWide.Operations;
 using Raven.Client.ServerWide.Operations.Certificates;
 using Raven.Client.Util;
+using Raven.Server.Commercial.LetsEncrypt;
 using Raven.Server.Config;
 using Raven.Server.Json;
 using Raven.Server.NotificationCenter.Notifications;
@@ -389,6 +391,11 @@ namespace Raven.Server.Commercial
             if (licenseStatus.Expiration.HasValue == false)
                 throw new LicenseExpiredException("License doesn't have an expiration date!");
 
+            if (licenseStatus.CanActivate(out DateTime? canBeActivateUntil) == false)
+            {
+                throw new LicenseExpiredException($"Cannot activate license because its max activation date has passed: {canBeActivateUntil}");
+            }
+
             if (licenseStatus.Expired)
             {
                 if (skipGettingUpdatedLicense)
@@ -399,17 +406,30 @@ namespace Raven.Server.Commercial
                     // license expired, we'll try to update it
                     var updatedLicense = await GetUpdatedLicenseForActivation(license);
                     if (updatedLicense == null)
-                        throw new LicenseExpiredException($"License already expired on: {licenseStatus.Expiration} and we failed to get an updated one from {ApiHttpClient.ApiRavenDbNet}.");
+                    {
+                        var errorMessage =
+                            $"License already expired on: {licenseStatus.FormattedExpiration} and we failed to get an updated one from {ApiHttpClient.ApiRavenDbNet}.";
+                        if (licenseStatus.IsIsv)
+                        {
+                            errorMessage += $" Since this is an ISV license, you can use this license with any RavenDB version that was released prior to {licenseStatus.FormattedExpiration}";
+                        }
+
+                        throw new LicenseExpiredException(errorMessage);
+                    }
 
                     await ActivateAsync(updatedLicense, raftRequestId, skipGettingUpdatedLicense: true);
                     return;
                 }
+                catch (LicenseExpiredException)
+                {
+                    throw;
+                }
                 catch (Exception e)
                 {
                     if (e is HttpRequestException)
-                        throw new LicenseExpiredException($"License already expired on: {licenseStatus.Expiration} and we were unable to get an updated license. Please make sure you that you have access to {ApiHttpClient.ApiRavenDbNet}.", e);
+                        throw new LicenseExpiredException($"License already expired on: {licenseStatus.FormattedExpiration} and we were unable to get an updated license. Please make sure you that you have access to {ApiHttpClient.ApiRavenDbNet}.", e);
 
-                    throw new LicenseExpiredException($"License already expired on: {licenseStatus.Expiration} and we were unable to get an updated license.", e);
+                    throw new LicenseExpiredException($"License already expired on: {licenseStatus.FormattedExpiration} and we were unable to get an updated license.", e);
                 }
             }
 
@@ -432,7 +452,7 @@ namespace Raven.Server.Commercial
                 throw new InvalidOperationException("Could not save license!", e);
             }
         }
-
+        
         private void ResetLicense(string error)
         {
             LicenseStatus = new LicenseStatus
@@ -679,6 +699,9 @@ namespace Raven.Server.Commercial
             if (license.Equals(currentLicense))
                 return null;
 
+            if (licenseStatus.CanActivate(out _) == false)
+                return null;
+
             return license;
         }
 
@@ -921,6 +944,16 @@ namespace Raven.Server.Commercial
 
         private void ThrowIfCannotActivateLicense(LicenseStatus newLicenseStatus)
         {
+            DateTime certificateNotBefore = new();
+            DateTime certificateNotAfter = new();
+            X509Certificate2 certificate = null;
+            if (_serverStore.Server.Certificate.Certificate != null)
+            {
+                certificateNotBefore  = _serverStore.Server.Certificate.Certificate.NotBefore; 
+                certificateNotAfter  = _serverStore.Server.Certificate.Certificate.NotAfter; 
+                certificate = _serverStore.Server.Certificate.Certificate;   
+            }
+            
             var clusterSize = GetClusterSize();
             var maxClusterSize = newLicenseStatus.MaxClusterSize;
             if (clusterSize > maxClusterSize)
@@ -946,7 +979,9 @@ namespace Raven.Server.Commercial
                                        "In order to use this license please disable SNMP Monitoring in the server configuration";
                 throw GenerateLicenseLimit(LimitType.Snmp, message);
             }
-
+            
+            SecretProtection.ValidateExpiration(nameof(LicenseManager), _serverStore.GetLicenseType(), newLicenseStatus.Type, certificate, certificateNotBefore, certificateNotAfter);
+            
             var encryptedDatabasesCount = 0;
             var externalReplicationCount = 0;
             var delayedExternalReplicationCount = 0;
@@ -1415,12 +1450,23 @@ namespace Raven.Server.Commercial
             if (IsValid(out var licenseLimit) == false)
                 throw licenseLimit;
 
-            if (LicenseStatus.HasElasticSearchEtl != false)
+            if (LicenseStatus.HasElasticSearchEtl)
                 return;
 
-            // TODO arek
-            //const string message = "Your current license doesn't include the ElasticSearch ETL feature";
-            //throw GenerateLicenseLimit(LimitType.ElasticSearchEtl, message);
+            const string message = "Your current license doesn't include the ElasticSearch ETL feature";
+            throw GenerateLicenseLimit(LimitType.ElasticSearchEtl, message);
+        }
+
+        public void AssertCanAddConcurrentDataSubscriptions()
+        {
+            if (IsValid(out var licenseLimit) == false)
+                throw licenseLimit;
+
+            if (LicenseStatus.HasConcurrentDataSubscriptions)
+                return;
+
+            const string message = "Your current license doesn't include the Concurrent Subscriptions feature";
+            throw GenerateLicenseLimit(LimitType.ConcurrentSubscriptions, message);
         }
 
         public void AssertCanAddOlapEtl()
@@ -1480,6 +1526,46 @@ namespace Raven.Server.Commercial
 
             const string details = "Your current license doesn't include the SNMP monitoring feature";
             GenerateLicenseLimit(LimitType.Snmp, details, addNotification: true);
+            return false;
+        }
+
+        public bool CanUsePostgreSqlIntegration(bool withNotification)
+        {
+            if (IsValid(out _) == false)
+                return false;
+
+            var value = LicenseStatus.HasPostgreSqlIntegration;
+            if (withNotification == false)
+                return value;
+
+            if (value)
+            {
+                DismissLicenseLimit(LimitType.PostgreSqlIntegration);
+                return true;
+            }
+
+            const string details = "Your current license doesn't include the PostgreSql integration feature";
+            GenerateLicenseLimit(LimitType.PostgreSqlIntegration, details, addNotification: true);
+            return false;
+        }
+
+        public bool CanUsePowerBi(bool withNotification, out LicenseLimitException licenseLimitException)
+        {
+            if (IsValid(out licenseLimitException) == false)
+                return false;
+
+            var value = LicenseStatus.HasPowerBI;
+            if (withNotification == false)
+                return value;
+
+            if (value)
+            {
+                DismissLicenseLimit(LimitType.PowerBI);
+                return true;
+            }
+            
+            const string details = "Your current license doesn't include the Power BI feature";
+            licenseLimitException = GenerateLicenseLimit(LimitType.PowerBI, details, addNotification: true);
             return false;
         }
 
@@ -1734,8 +1820,8 @@ namespace Raven.Server.Commercial
 
                     var modifiedJsonObj = context.ReadObject(settingsJson, "modified-settings-json");
 
-                    var indentedJson = SetupManager.IndentJsonString(modifiedJsonObj.ToString());
-                    SetupManager.WriteSettingsJsonLocally(settingsPath, indentedJson);
+                    var indentedJson = JsonStringHelper.Indent(modifiedJsonObj.ToString());
+                    SettingsZipFileHelper.WriteSettingsJsonLocally(settingsPath, indentedJson);
                 }
                 _eulaAcceptedButHasPendingRestart = true;
             }

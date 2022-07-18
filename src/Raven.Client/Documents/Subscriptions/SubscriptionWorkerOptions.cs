@@ -66,6 +66,7 @@ namespace Raven.Client.Documents.Subscriptions
             public string CurrentTag;
             public string RedirectedTag;
             public Dictionary<string, string> Reasons;
+            public long? RegisterConnectionDurationInTicks;
         }
 
         public MessageType Type { get; set; }
@@ -110,6 +111,7 @@ namespace Raven.Client.Documents.Subscriptions
                 throw new ArgumentException("Value cannot be null or empty.", nameof(subscriptionName));
 
             SubscriptionName = subscriptionName;
+            WorkerId = Guid.NewGuid().ToString();
         }
 
         /// <summary>
@@ -158,5 +160,7 @@ namespace Raven.Client.Documents.Subscriptions
         /// Receive buffer for the underlying connection. Default: 4096 bytes (4 kB)
         /// </summary>
         public int ReceiveBufferSizeInBytes { get; set; }
+
+        public string WorkerId { get; internal set; }
     }
 }
